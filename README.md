@@ -10,13 +10,19 @@ whose `arrangement.core` interleaved this query half with a persistence half
 is here. The coupling between the two ran in exactly one direction and
 through exactly one line — see "The one cut", below.
 
+Re-extracted from `arrangement` `c09ce59f5b384e5035d9efd4d24cbcb1bcdf30bd`
+(2026-08-02), which is where the query layer's hash join, limit pushdown,
+projection pruning and `cardinality` work landed. The extraction is
+mechanical — a namespace rename plus the one cut — precisely so that
+re-running it stays cheaper than merging by hand.
+
 ## Namespaces
 
 | ns | what it is | requires |
 | --- | --- | --- |
 | `datalog.index` | the four covering indexes `{:spo :pso :pos :ocp}` — EAVT/AEVT/AVET/VAET in Datomic's vocabulary | nothing |
-| `datalog.query` | single `[s p o]` triple pattern with `nil` wildcards, routed to whichever index has the bound positions leading | `datalog.index` |
-| `datalog.core` | the Datalog engine: multi-clause join, `:find`/`:in`/`:where`/`:rules` | `datalog.query`, `datom.source` |
+| `datalog.query` | single `[s p o]` triple pattern with `nil` wildcards, routed to whichever index has the bound positions leading; `cardinality` counts a pattern's matches without materialising them | `datalog.index` |
+| `datalog.core` | the Datalog engine: multi-clause join, `:find`/`:in`/`:where`/`:rules`/`:order-by`/`:limit` | `datalog.index`, `datalog.query`, `datom.source` |
 
 ```clojure
 (require '[datalog.index :as index]
@@ -99,6 +105,35 @@ anything.
   `as-of`/`since`, no transaction metadata.
 - **Not a query planner.** `:where` clauses join strictly left-to-right in
   the order written. Clause order is a performance decision the caller owns.
+  `:clause-cardinality` is a *hint a caller's own planner supplies* — it
+  selects an execution strategy, never a clause order and never a semantics.
+
+## Execution strategies
+
+These change how much work a query does, never what it answers. Each is
+asserted against the path it replaces, by a test suite that runs the same
+query both ways and compares:
+
+- **One scan per distinct substituted pattern**, not one per binding. A step
+  carrying thousands of bindings that substitute down to a few hundred
+  distinct patterns asks the source a few hundred times.
+- **Hash join under a cardinality hint.** With `:clause-cardinality`
+  `{clause estimated-rows}`, a clause whose whole relation is small relative
+  to the number of keyed scans a step would issue for it is read *once* and
+  hash-joined. Omit the hint and every step stays on the keyed path — the
+  safe default, since a broad scan of a large relation is the mistake the
+  budget exists to avoid. A wrong hint costs time, never correctness
+  (`hash_join_test.cljc` asserts this with a deliberately absurd one).
+- **Projection pruning.** Variables that no remaining clause and no `:find`
+  element reads are dropped between steps, which merges bindings that
+  differed only in a column nobody reads. Disabled entirely when `:find`
+  contains an aggregate, because there multiplicity *is* the answer.
+- **Limit pushdown.** When `:limit` is set and `:order-by`'s first key is a
+  plain variable bound by exactly one clause, in that clause's value
+  position, and every `:where` clause is a plain triple, the join is driven
+  from that clause's distinct values in sort order and stops once `:limit`
+  rows exist. Any of those conditions failing falls back to the ordinary
+  path, which is always correct.
 
 ## Known gaps
 
@@ -139,15 +174,17 @@ Stated because they are real, not because they are planned:
 ## Tests
 
 Ported from `arrangement`'s suite — the deftests covering the index
-accessors, query routing, and Datalog. `arrangement`'s IPLD-Link and
-commit/restore tests were not ported; they belong to the half that stayed.
+accessors, query routing, Datalog, and each execution strategy (hash join,
+limit pushdown, order/limit, projection pruning, cardinality).
+`arrangement`'s IPLD-Link and commit/restore tests were not ported; they
+belong to the half that stayed.
 
 ```bash
-clojure -M:test      # JVM: 58 tests, 83 assertions, 0 failures, 0 errors
+clojure -M:test      # JVM: 86 tests, 138 assertions, 0 failures, 0 errors
 clojure -M:lint      # clj-kondo: 0 errors, 0 warnings
 npm install && npm run test:cljs
                      # ClojureScript (shadow-cljs :node-test):
-                     # 58 tests, 83 assertions, 0 failures, 0 errors
+                     # 86 tests, 138 assertions, 0 failures, 0 errors
 ```
 
 Both jobs run in CI on every push and PR. The ClojureScript job is a real
