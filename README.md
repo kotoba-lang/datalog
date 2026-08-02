@@ -12,14 +12,24 @@ through exactly one line — see "The one cut", below.
 
 Re-extracted from `arrangement` `c09ce59f5b384e5035d9efd4d24cbcb1bcdf30bd`
 (2026-08-02), which is where the query layer's hash join, projection pruning
-and `cardinality` work landed. The extraction is mechanical — a namespace
-rename plus the one cut — precisely so that re-running it stays cheaper than
-merging by hand.
+and `cardinality` work landed. The extraction was mechanical — a namespace
+rename plus the one cut — precisely so that re-running it stayed cheaper
+than merging by hand.
 
 That base also carried a **limit pushdown**, which `arrangement` reverted
 hours later (`a98588c`) after the real LDBC dataset showed it made the very
 queries it targeted several times slower. This library follows that revert —
 see "Known gaps".
+
+**There is no longer anything to re-extract: this is the only copy.**
+`arrangement` `096523f` deleted its query layer and now depends on this
+library. Its `arrangement.query` and `arrangement.datalog` are compatibility
+shims delegating to `datalog.query` / `datalog.core`, and its
+`arrangement.core` re-exports `datalog.index` (adding back the `ipld/link?`
+default for `ref?` — see "The one cut"), so its existing consumers did not
+change. Removing those shims is a follow-up. The re-extraction above was
+needed because the two copies drifted 20 commits apart in silence; that
+cannot happen to a shim.
 
 ## Namespaces
 
@@ -27,7 +37,7 @@ see "Known gaps".
 | --- | --- | --- |
 | `datalog.index` | the four covering indexes `{:spo :pso :pos :ocp}` — EAVT/AEVT/AVET/VAET in Datomic's vocabulary | nothing |
 | `datalog.query` | single `[s p o]` triple pattern with `nil` wildcards, routed to whichever index has the bound positions leading; `cardinality` counts a pattern's matches without materialising them | `datalog.index` |
-| `datalog.core` | the Datalog engine: multi-clause join, `:find`/`:in`/`:where`/`:rules`/`:order-by`/`:limit` | `datalog.index`, `datalog.query`, `datom.source` |
+| `datalog.core` | the Datalog engine: multi-clause join, `:find`/`:in`/`:where`/`:rules`/`:order-by`/`:limit` | `datalog.query`, `datom.source` |
 
 ```clojure
 (require '[datalog.index :as index]
@@ -193,11 +203,11 @@ order/limit, projection pruning, cardinality).
 belong to the half that stayed.
 
 ```bash
-clojure -M:test      # JVM: 86 tests, 138 assertions, 0 failures, 0 errors
+clojure -M:test      # JVM: 79 tests, 127 assertions, 0 failures, 0 errors
 clojure -M:lint      # clj-kondo: 0 errors, 0 warnings
 npm install && npm run test:cljs
                      # ClojureScript (shadow-cljs :node-test):
-                     # 86 tests, 138 assertions, 0 failures, 0 errors
+                     # 79 tests, 127 assertions, 0 failures, 0 errors
 ```
 
 Both jobs run in CI on every push and PR. The ClojureScript job is a real
