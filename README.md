@@ -11,10 +11,15 @@ is here. The coupling between the two ran in exactly one direction and
 through exactly one line — see "The one cut", below.
 
 Re-extracted from `arrangement` `c09ce59f5b384e5035d9efd4d24cbcb1bcdf30bd`
-(2026-08-02), which is where the query layer's hash join, limit pushdown,
-projection pruning and `cardinality` work landed. The extraction is
-mechanical — a namespace rename plus the one cut — precisely so that
-re-running it stays cheaper than merging by hand.
+(2026-08-02), which is where the query layer's hash join, projection pruning
+and `cardinality` work landed. The extraction is mechanical — a namespace
+rename plus the one cut — precisely so that re-running it stays cheaper than
+merging by hand.
+
+That base also carried a **limit pushdown**, which `arrangement` reverted
+hours later (`a98588c`) after the real LDBC dataset showed it made the very
+queries it targeted several times slower. This library follows that revert —
+see "Known gaps".
 
 ## Namespaces
 
@@ -128,16 +133,24 @@ query both ways and compares:
   element reads are dropped between steps, which merges bindings that
   differed only in a column nobody reads. Disabled entirely when `:find`
   contains an aggregate, because there multiplicity *is* the answer.
-- **Limit pushdown.** When `:limit` is set and `:order-by`'s first key is a
-  plain variable bound by exactly one clause, in that clause's value
-  position, and every `:where` clause is a plain triple, the join is driven
-  from that clause's distinct values in sort order and stops once `:limit`
-  rows exist. Any of those conditions failing falls back to the ordinary
-  path, which is always correct.
+There is deliberately **no limit pushdown** — see "Known gaps".
 
 ## Known gaps
 
 Stated because they are real, not because they are planned:
+
+- **`:limit` is not pushed into the join.** It applies to the finished
+  projection, so the join still does all of its work; `:limit` makes top-N
+  *expressible*, not cheaper. An ordered drive was landed upstream and
+  reverted (`arrangement` `a98588c`): driving from the ordering clause
+  re-derives every remaining clause once per value group, including the ones
+  that do not depend on the driver at all. On LDBC IC02 that meant re-deriving
+  882 rows 7,355 times — 6.5M rows of pure repetition to avoid joining 7,355 —
+  and the harness went from ~4-5 minutes of CPU to over 15. Every equivalence
+  test still passed; what broke was cost, which a 40-person fixture has too
+  few distinct values to expose. The correct shape is a join reordering
+  (evaluate driver-independent clauses once, run only the dependent ones per
+  group, semi-join the two) and is not written.
 
 - **No `pull`.** Projection is positional `:find` vectors only. There is no
   pull expression, no pattern syntax, no nested entity maps.
@@ -175,7 +188,7 @@ Stated because they are real, not because they are planned:
 
 Ported from `arrangement`'s suite — the deftests covering the index
 accessors, query routing, Datalog, and each execution strategy (hash join,
-limit pushdown, order/limit, projection pruning, cardinality).
+order/limit, projection pruning, cardinality).
 `arrangement`'s IPLD-Link and commit/restore tests were not ported; they
 belong to the half that stayed.
 
