@@ -81,3 +81,51 @@
   it. The equivalence test asserts that rather than assuming it."
   [db pattern visible?]
   (count (filter visible? (query-seq db pattern))))
+
+(defn estimate-cardinality
+  "Cheap upper bound for how many quads `pattern` can match, derived directly
+  from the covering indexes without constructing quads or invoking a
+  visibility predicate.
+
+  This is deliberately NOT `cardinality`: authorization may hide some of the
+  indexed rows, so the result can be larger than a visible query's result.
+  That makes it suitable for a query planner's cost hint (an overestimate can
+  choose a less aggressive strategy but cannot expose a row or change an
+  answer), while callers that need an exact visible count must continue to use
+  `cardinality`.
+
+  The common graph-planning cases are proportional to index groups rather than
+  matching rows: predicate-only patterns sum the sizes of the predicate's
+  subject buckets, and a fully unbound pattern sums the subject/attribute
+  buckets. In particular, no `{:s :p :o}` maps are allocated and no set is
+  built merely to learn a planning number."
+  [db [s p o]]
+  (cond
+    (some? s)
+    (let [attrs (index/entity-attrs db s)]
+      (cond
+        (some? p) (let [os (get attrs p #{})]
+                    (if (some? o) (if (contains? os o) 1 0) (count os)))
+        (some? o) (reduce-kv (fn [n _ os] (if (contains? os o) (inc n) n)) 0 attrs)
+        :else (reduce-kv (fn [n _ os] (+ n (count os))) 0 attrs)))
+
+    (and (some? p) (some? o))
+    (count (index/by-predicate-value db p o))
+
+    (some? p)
+    (reduce-kv (fn [n _ os] (+ n (count os))) 0 (index/by-predicate db p))
+
+    ;; There is no general object index: :ocp intentionally contains only
+    ;; ref-valued objects. Walk the subject/attribute buckets, but still avoid
+    ;; allocating one quad per row as query-seq/cardinality must.
+    (some? o)
+    (reduce-kv (fn [n _ attrs]
+                 (+ n (reduce-kv (fn [m _ os] (if (contains? os o) (inc m) m)) 0 attrs)))
+               0
+               (:spo db))
+
+    :else
+    (reduce-kv (fn [n _ attrs]
+                 (+ n (reduce-kv (fn [m _ os] (+ m (count os))) 0 attrs)))
+               0
+               (:spo db))))
