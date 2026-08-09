@@ -52,6 +52,15 @@
       (is (= (count (q/query d p only-p0)) (q/cardinality d p only-p0))
           (str "pattern " p " under a restrictive visible?")))))
 
+(deftest estimate-cardinality-is-an-index-derived-visible-upper-bound
+  (let [d (db)
+        only-p0 (fn [{:keys [s]}] (= s "p0"))]
+    (doseq [p patterns]
+      (is (= (count (q/query d p everything)) (q/estimate-cardinality d p))
+          (str "exact for the unfiltered index at pattern " p))
+      (is (<= (count (q/query d p only-p0)) (q/estimate-cardinality d p))
+          (str "an upper bound under visibility filtering at pattern " p)))))
+
 (deftest query-still-returns-a-set
   ;; query-seq is a seq now; query's contract is unchanged.
   (let [r (q/query (db) [nil "knows" nil] everything)]
