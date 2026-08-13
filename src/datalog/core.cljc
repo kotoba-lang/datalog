@@ -116,6 +116,23 @@
             [clojure.string :as str]
             [clojure.set :as set]))
 
+(def ^:dynamic ^:private *pattern-source?*
+  "Whether the db of the query currently running satisfies `IPatternSource`.
+
+  `scan*` used to ask that question with `satisfies?` on every call, and `q`
+  calls `scan*` once per DISTINCT SUBSTITUTED PATTERN -- 882 times for one
+  clause of LDBC IC02 alone, roughly 1,800 times for the whole query. Measured
+  2026-08-14: `satisfies?` on a materialized-map db costs 11,305 ns and the keyed
+  index read it guards costs 210 ns, so the check was 54x the work it protected
+  and 89% of that query
+  (kotobase-peer bench/results/2026-08-14-the-residue-is-a-protocol-check.edn).
+
+  The type does not change during a query, so `q` decides once and binds this.
+  `nil` means nobody decided -- a direct call to an internal, or work that
+  escaped the binding -- and `scan*` falls back to asking, so the answer is
+  never wrong, only slower."
+  nil)
+
 (defn- scan*
   "Resolve one clause pattern against `db`, which may be EITHER a materialized
   db (the historical argument) or anything satisfying
@@ -129,7 +146,7 @@
   filtered differently from `datalog.query/query` would let a negation
   observe a fact a positive clause cannot see."
   [db pattern visible?]
-  (if (satisfies? ds/IPatternSource db)
+  (if (if (some? *pattern-source?*) *pattern-source?* (satisfies? ds/IPatternSource db))
     (into #{} (filter visible?) (ds/scan db pattern))
     (query/query db pattern visible?)))
 
@@ -859,7 +876,8 @@
   separate change -- see `order+limit`."
   ([db query visible?] (q db query visible? []))
   ([db {:keys [find where rules in order-by limit clause-cardinality]} visible? inputs]
-   (let [in-syms (vec (remove #{'$} (or in [])))
+   (binding [*pattern-source?* (satisfies? ds/IPatternSource db)]
+    (let [in-syms (vec (remove #{'$} (or in [])))
          initial-binding (into {} (map vector in-syms inputs))
          parsed-rules (parse-rules (or rules []))
          all-clauses (flatten-clauses (into where (mapcat :body) (mapcat val parsed-rules)))]
@@ -883,4 +901,4 @@
                                   bs)))
                             #{initial-binding}
                             (map-indexed vector where))]
-       (order+limit (project bindings find) find order-by limit)))))
+       (order+limit (project bindings find) find order-by limit))))))
