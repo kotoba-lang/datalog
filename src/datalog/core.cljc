@@ -159,15 +159,34 @@
   position's value (e.g. `[?x :likes ?x]` against a row where s != o).
   Used for both triple clauses (`terms`/`values` are `[e a v]`/`[s p o]`)
   and rule invocations (`terms`/`values` are the invocation's args/a
-  matched tuple in the rule's own param order)."
+  matched tuple in the rule's own param order).
+
+  Walked by index rather than by `(map vector terms values)`. That form reads
+  better and allocated a lazy seq plus one pair vector per TERM on every matched
+  row -- four objects a row for a triple clause, on the hottest path here.
+  Measured 2026-08-14 over 361,246 rows of the LDBC `hasCreator` clause shape,
+  with both forms asserted to return equal bindings: 316.3 ns a row for the
+  `map vector` form against 100.5 ns for this one.
+
+  End to end that reaches a single-clause scan as about -12% and a three-clause
+  LDBC join as -2% to -5%
+  (kotobase-peer bench/results/2026-08-14-unify-indexed-landed.edn).
+
+  `terms` is a clause vector for a triple and a rule invocation's arg seq for a
+  rule, so neither is assumed indexed; a seq is converted once per call rather
+  than once per term."
   [binding terms values]
-  (reduce (fn [b [term v]]
-            (cond
-              (or (wildcard? term) (not (lvar? term))) b
-              (contains? b term) (if (= (get b term) v) b (reduced nil))
-              :else (assoc b term v)))
-          binding
-          (map vector terms values)))
+  (let [tv (if (vector? terms) terms (vec terms))
+        vv (if (vector? values) values (vec values))
+        n (count tv)]
+    (loop [i 0 b binding]
+      (if (or (nil? b) (== i n))
+        b
+        (let [term (nth tv i)]
+          (cond
+            (or (wildcard? term) (not (lvar? term))) (recur (inc i) b)
+            (contains? b term) (if (= (get b term) (nth vv i)) (recur (inc i) b) nil)
+            :else (recur (inc i) (assoc b term (nth vv i)))))))))
 
 (defn- not-clause?
   "`(not [e a v])` -- a `:where` element that isn't itself a triple pattern
