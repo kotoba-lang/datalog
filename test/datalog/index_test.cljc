@@ -118,3 +118,32 @@
 (deftest assert-quads-on-an-empty-batch-changes-nothing
   (let [db (index/assert-quads (index/empty-db) [{:s "a" :p "b" :o "c"}] (constantly false))]
     (is (= db (index/assert-quads db [] (constantly false))))))
+
+(deftest builder-in-batches-equals-one-call
+  ;; The reason the builder exists: `assert-quads` walks the existing db's outer
+  ;; keys on every call, so looping it over batches is quadratic in the number
+  ;; of batches. The builder must produce the identical db without that walk.
+  (let [ref? (constantly false)
+        quads (vec (for [i (range 900)]
+                     {:s (str "s" (mod i 120)) :p (str "p" (mod i 9)) :o (str "o" (mod i 37))}))
+        one (index/assert-quads (index/empty-db) quads ref?)
+        batched (index/persist-db
+                 (reduce (fn [m b] (index/assert-quads! m b ref?))
+                         (index/mutable-db (index/empty-db))
+                         (partition-all 100 quads)))]
+    (is (= one batched))
+    (is (= (reduce #(index/assert-quad %1 %2 ref?) (index/empty-db) quads) batched))))
+
+(deftest builder-starts-from-a-non-empty-db
+  (let [ref? (constantly false)
+        a (vec (for [i (range 50)] {:s (str "s" i) :p "p" :o (str "o" i)}))
+        b (vec (for [i (range 50 130)] {:s (str "s" i) :p "p" :o (str "o" i)}))
+        base (index/assert-quads (index/empty-db) a ref?)]
+    (is (= (index/assert-quads base b ref?)
+           (index/persist-db
+            (reduce (fn [m x] (index/assert-quads! m x ref?))
+                    (index/mutable-db base) (partition-all 20 b)))))))
+
+(deftest builder-with-no-batches-round-trips
+  (let [db (index/assert-quads (index/empty-db) [{:s "a" :p "b" :o "c"}] (constantly false))]
+    (is (= db (index/persist-db (index/mutable-db db))))))
