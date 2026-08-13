@@ -81,3 +81,40 @@
                  (index/assert-quad {:s "a" :p "b" :o "c"} no-refs))
         twice (index/assert-quad once {:s "a" :p "b" :o "c"} no-refs)]
     (is (= once twice))))
+
+;; ---------------------------------------------------------------- bulk ingest
+
+(deftest assert-quads-equals-reducing-assert-quad
+  ;; The whole contract. It is also what caught the first version: `assoc!` on a
+  ;; transient array-map returns a DIFFERENT object once it passes eight
+  ;; entries, and discarding that return value truncated every inner map at
+  ;; exactly eight -- a corruption no smaller fixture would have shown.
+  (let [ref? #(and (string? %) (str/starts-with? % "e"))
+        quads (vec (for [i (range 500)]
+                     {:s (str "e" (mod i 40)) :p (str "p" (mod i 7)) :o (str "o" (mod i 23))}))]
+    (is (= (reduce #(index/assert-quad %1 %2 ref?) (index/empty-db) quads)
+           (index/assert-quads (index/empty-db) quads ref?)))))
+
+(deftest assert-quads-crosses-the-array-map-boundary
+  ;; Nine inner keys, one more than a transient array-map holds.
+  (let [quads (vec (for [i (range 9)] {:s "one-subject" :p (str "p" i) :o "v"}))
+        db (index/assert-quads (index/empty-db) quads (constantly false))]
+    (is (= 9 (count (index/entity-attrs db "one-subject"))))))
+
+(deftest assert-quads-merges-into-a-non-empty-db
+  (let [ref? (constantly false)
+        a (vec (for [i (range 30)] {:s (str "s" i) :p "p" :o (str "o" i)}))
+        b (vec (for [i (range 30 60)] {:s (str "s" i) :p "p" :o (str "o" i)}))]
+    (is (= (reduce #(index/assert-quad %1 %2 ref?) (index/assert-quads (index/empty-db) a ref?) b)
+           (index/assert-quads (index/assert-quads (index/empty-db) a ref?) b ref?)))))
+
+(deftest assert-quads-indexes-refs-like-assert-quad
+  (let [ref? #(and (string? %) (str/starts-with? % "e"))
+        quads [{:s "e1" :p "knows" :o "e2"} {:s "e1" :p "name" :o "Ada"}]]
+    (is (= (reduce #(index/assert-quad %1 %2 ref?) (index/empty-db) quads)
+           (index/assert-quads (index/empty-db) quads ref?)))
+    (is (seq (index/refs-to (index/assert-quads (index/empty-db) quads ref?) "e2")))))
+
+(deftest assert-quads-on-an-empty-batch-changes-nothing
+  (let [db (index/assert-quads (index/empty-db) [{:s "a" :p "b" :o "c"}] (constantly false))]
+    (is (= db (index/assert-quads db [] (constantly false))))))
