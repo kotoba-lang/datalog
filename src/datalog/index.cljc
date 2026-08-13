@@ -62,6 +62,57 @@
     true     (update :pos upd p o s)
     (ref? o) (update :ocp upd o p s)))
 
+(defn- ->mutable
+  "One index, `{k1 {k2 #{v}}}`, with every inner map made transient. The outer
+  map stays persistent on purpose: after a key exists, a bulk insert mutates
+  its inner map in place and never touches the outer map again."
+  [m]
+  (reduce-kv (fn [acc k v] (assoc acc k (transient v))) {} m))
+
+(defn- freeze [m]
+  (reduce-kv (fn [acc k v] (assoc acc k (persistent! v))) {} m))
+
+(defn- upd-mut [m k1 k2 v]
+  (if-let [inner (get m k1)]
+    ;; `assoc!` USUALLY mutates in place and returns the same object, so the
+    ;; outer map usually needs no path copy at all. It does NOT always: a
+    ;; transient array-map returns a different object when it grows past eight
+    ;; entries and becomes a hash-map. Discarding the return value therefore
+    ;; silently truncates every inner map at exactly eight entries -- which is
+    ;; what the first version of this did, and what the equivalence test caught.
+    (let [inner' (assoc! inner k2 (conj (get inner k2 #{}) v))]
+      (if (identical? inner' inner) m (assoc m k1 inner')))
+    (assoc m k1 (assoc! (transient {}) k2 #{v}))))
+
+(defn assert-quads
+  "Bulk `assert-quad`. Same result as `(reduce #(assert-quad %1 %2 ref?) db qs)`
+  -- there is a test asserting exactly that -- built for loading a dataset
+  rather than for one write.
+
+  Measured 2026-08-13, loading 2,000,000 real LDBC SNB datoms into an empty db
+  on an Apple M4: **888k datoms/s here against 600k for reducing `assert-quad`**
+  -- about 1.5x. Worth having for a dataset load, and no more than that.
+
+  It is deliberately recorded here that this was written believing the per-quad
+  path was a far worse bottleneck than it is. It is not: 2,000,000 datoms take
+  3.3 seconds through `assert-quad`. Do not cite this function as the reason a
+  large load became possible.
+
+  `assert-quad` remains the right call for a single write. This one pays an
+  up-front pass over the existing outer keys to make the inner maps transient,
+  so it is for batches, not for one-at-a-time use in a loop."
+  [db quads ref?]
+  (loop [qs (seq quads)
+         spo (->mutable (:spo db)) pso (->mutable (:pso db))
+         pos (->mutable (:pos db)) ocp (->mutable (:ocp db))]
+    (if-let [{:keys [s p o]} (first qs)]
+      (recur (next qs)
+             (upd-mut spo s p o)
+             (upd-mut pso p s o)
+             (upd-mut pos p o s)
+             (if (ref? o) (upd-mut ocp o p s) ocp))
+      {:spo (freeze spo) :pso (freeze pso) :pos (freeze pos) :ocp (freeze ocp)})))
+
 (defn retract-quad
   "Remove `{:s :p :o}` from `db`'s four indices. `ref?` is REQUIRED and must
   agree with the one used to assert the same quad -- otherwise the `:ocp`
