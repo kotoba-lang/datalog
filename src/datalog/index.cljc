@@ -84,6 +84,46 @@
       (if (identical? inner' inner) m (assoc m k1 inner')))
     (assoc m k1 (assoc! (transient {}) k2 #{v}))))
 
+(defn mutable-db
+  "A mutable bulk-loading accumulator over `db`. Pair with `assert-quads!` and
+  finish with `persist-db`. NOT a db: nothing else in this namespace accepts
+  one, and it is not safe to share or to hold across threads.
+
+  This exists because the cost `assert-quads` pays once -- walking the existing
+  outer keys to make their inner maps transient -- is proportional to the db,
+  not to the batch. Calling `assert-quads` in a loop therefore pays that walk
+  once per batch, which is quadratic in the number of batches.
+
+  Measured 2026-08-13, LDBC SNB SF-1 (31,837,452 datoms) in 500,000-datom
+  batches: the looped `assert-quads` form was still running after 25 minutes,
+  with a JVM thread dump showing the main thread inside the transient-conversion
+  walk. That was mistaken for the engine being super-linear in ingest. It is
+  not; the loop was."
+  [db]
+  {:spo (->mutable (:spo db)) :pso (->mutable (:pso db))
+   :pos (->mutable (:pos db)) :ocp (->mutable (:ocp db))})
+
+(defn assert-quads!
+  "Add `quads` to a `mutable-db`, returning the accumulator. Cheap to call
+  repeatedly: no per-call walk of the existing db."
+  [mdb quads ref?]
+  (loop [qs (seq quads)
+         spo (:spo mdb) pso (:pso mdb) pos (:pos mdb) ocp (:ocp mdb)]
+    (if-let [{:keys [s p o]} (first qs)]
+      (recur (next qs)
+             (upd-mut spo s p o)
+             (upd-mut pso p s o)
+             (upd-mut pos p o s)
+             (if (ref? o) (upd-mut ocp o p s) ocp))
+      {:spo spo :pso pso :pos pos :ocp ocp})))
+
+(defn persist-db
+  "Finish a `mutable-db`, returning a db. The accumulator must not be used
+  afterwards."
+  [mdb]
+  {:spo (freeze (:spo mdb)) :pso (freeze (:pso mdb))
+   :pos (freeze (:pos mdb)) :ocp (freeze (:ocp mdb))})
+
 (defn assert-quads
   "Bulk `assert-quad`. Same result as `(reduce #(assert-quad %1 %2 ref?) db qs)`
   -- there is a test asserting exactly that -- built for loading a dataset
@@ -98,20 +138,11 @@
   3.3 seconds through `assert-quad`. Do not cite this function as the reason a
   large load became possible.
 
-  `assert-quad` remains the right call for a single write. This one pays an
-  up-front pass over the existing outer keys to make the inner maps transient,
-  so it is for batches, not for one-at-a-time use in a loop."
+  ONE CALL PER LOAD. It pays an up-front walk over the existing db's outer keys,
+  so calling it once per batch in a loop is quadratic in the number of batches.
+  To load in batches, use `mutable-db` / `assert-quads!` / `persist-db`."
   [db quads ref?]
-  (loop [qs (seq quads)
-         spo (->mutable (:spo db)) pso (->mutable (:pso db))
-         pos (->mutable (:pos db)) ocp (->mutable (:ocp db))]
-    (if-let [{:keys [s p o]} (first qs)]
-      (recur (next qs)
-             (upd-mut spo s p o)
-             (upd-mut pso p s o)
-             (upd-mut pos p o s)
-             (if (ref? o) (upd-mut ocp o p s) ocp))
-      {:spo (freeze spo) :pso (freeze pso) :pos (freeze pos) :ocp (freeze ocp)})))
+  (persist-db (assert-quads! (mutable-db db) quads ref?)))
 
 (defn retract-quad
   "Remove `{:s :p :o}` from `db`'s four indices. `ref?` is REQUIRED and must
