@@ -5,7 +5,7 @@
  ;; prolly-tree, block-cache. Nothing here stores, hashes, or addresses
  ;; anything. Pinned to the same SHA `kotoba-lang/arrangement`'s main uses.
  :deps {io.github.kotoba-lang/datom-source
-        {:git/sha "32fd54f091348dab3c78bee765bb7214a056488d"}}
+        {:git/sha "3a99b1b1fb2d2f8736995076eb1ab5f94f0808b7"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
