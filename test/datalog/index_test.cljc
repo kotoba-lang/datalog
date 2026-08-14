@@ -147,3 +147,18 @@
 (deftest builder-with-no-batches-round-trips
   (let [db (index/assert-quads (index/empty-db) [{:s "a" :p "b" :o "c"}] (constantly false))]
     (is (= db (index/persist-db (index/mutable-db db))))))
+
+(deftest by-predicate-range-is-half-open
+  (let [db (reduce (fn [d i]
+                     (index/assert-quad d {:s (str "s" i) :p "age" :o i} no-refs))
+                   (index/empty-db)
+                   (range 10))]
+    (is (= {"s3" #{3} "s4" #{4} "s5" #{5}}
+           (index/by-predicate-range db "age" 3 6)))
+    (is (not (contains? (index/by-predicate-range db "age" 3 6) "s6"))
+        "hi is exclusive")
+    (is (= {"s0" #{0} "s1" #{1}}
+           (index/by-predicate-range db "age" nil 2))
+        "nil lo is unbounded")
+    (is (= {"s8" #{8} "s9" #{9}}
+           (index/by-predicate-range db "age" 8 nil {:hi-open? true})))))

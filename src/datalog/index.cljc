@@ -8,10 +8,10 @@
   them, it only uses them as map keys, so anything with value equality and a
   hash works (strings, keywords, numbers, records, content addresses).
 
-  **No storage, no content addressing, no IPLD.** This namespace is pure data
-  structure: `empty-db` returns a plain map, every operation is a pure
-  function of a map to a map, and the whole thing is `.cljc` with zero
-  requires. Persisting one of these -- snapshotting the indices into a
+  **No storage, no content addressing, no IPLD.** This namespace is a pure data
+  structure plus `datom.source/in-range?` so a value interval on `:pos` uses
+  the same total order as the query seam. `empty-db` returns a plain map;
+  every mutation is a pure function of a map to a map. Persisting one of these -- snapshotting the indices into a
   prolly-tree, addressing that by CID, committing/restoring -- is somebody
   else's job (see `kotoba-lang/arrangement`, which this was extracted from
   and which keeps the persistence half). The split is deliberate: querying is
@@ -31,7 +31,8 @@
       (defn assert-quad [db q] (index/assert-quad db q ipld/link?))
 
   Pass `(constantly false)` if you do not use reverse-reference lookup;
-  `refs-to` then always returns `{}` and `:ocp` stays empty.")
+  `refs-to` then always returns `{}` and `:ocp` stays empty."
+  (:require [datom.source :as ds]))
 
 (defn empty-db
   "A db with all four indices empty. Just a map -- nothing to close, nothing
@@ -166,6 +167,24 @@
 (defn by-predicate-value
   "All subjects `s` where `[s p o]` holds (AVET-style point lookup)."
   [db p o] (get-in db [:pos p o] #{}))
+
+(defn by-predicate-range
+  "AVET-style value interval: `{s #{o...}}` for predicate `p` whose object
+  is in `[lo, hi)` (see `datom.source/in-range?`).
+
+  Walks the values of `p` in `:pos` and filters. That is O(|values of p|),
+  not a tree cut — in-memory `:pos` is a hash map, not a sorted map
+  (sorted-map cannot be transient, and `assert-quads!` depends on that).
+  The tree cut lives in `prolly-tree/scan-range` and in lake columnar
+  stats; this function is the same *question* on the hot db."
+  ([db p lo hi] (by-predicate-range db p lo hi {}))
+  ([db p lo hi opts]
+   (reduce-kv (fn [acc o ss]
+                (if (ds/in-range? o lo hi opts)
+                  (reduce (fn [m s] (update m s (fnil conj #{}) o)) acc ss)
+                  acc))
+              {}
+              (get-in db [:pos p] {}))))
 
 (defn refs-to
   "All `{p #{s...}}` referencing object `o` (VAET-style reverse lookup) --

@@ -186,10 +186,12 @@ Stated because they are real, not because they are planned:
 - **`retract-quad` must be given a `ref?` that agrees with the one used to
   assert the same quad,** or the `:ocp` entry is left behind. Nothing
   enforces this.
-- **Values are opaque.** s/p/o are used as map keys and nothing more — no
-  typed-value support, no ordering, no range queries. `<`/`>` exist as
-  *predicate clause functions* over already-bound values, not as index
-  operations.
+- **Values are opaque for indexing, except range.** s/p/o are map keys.
+ `<`/`>` still exist as predicate clause functions over already-bound
+ values. Adjacent `[?e attr ?v]` plus those comparisons are fused into
+ `query-range` / `IRangeSource` so the interval is cut once rather than
+ scanned then filtered. HMAC-blinded persisted keys still cannot prune
+ by value — that path stays prefix + decrypt + filter.
 - **The fixpoint has a defensive iteration cap** (10,000) that throws rather
   than hanging. Derivation is monotonic over a finite domain so a correct
   query converges long before it; the cap exists to fail loudly.

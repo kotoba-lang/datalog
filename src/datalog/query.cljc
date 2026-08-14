@@ -66,6 +66,20 @@
   [db pattern visible?]
   (into #{} (filter visible?) (query-seq db pattern)))
 
+(defn query-range
+  "Quads of `attr` whose object is in `[lo, hi)` under `visible?`.
+
+  Same `visible?` contract as `query`. Default interval is `[lo, hi)`
+  (`:lo-open? false`, `:hi-open? true`). This is the in-memory form of
+  Datomic `index-range`; it filters `:pos` rather than cutting a tree."
+  ([db attr lo hi visible?] (query-range db attr lo hi visible? {}))
+  ([db attr lo hi visible? opts]
+   (into #{}
+         (comp (mapcat (fn [[s os]]
+                         (map (fn [o] {:s s :p attr :o o}) os)))
+               (filter visible?))
+         (index/by-predicate-range db attr lo hi opts))))
+
 (defn cardinality
   "How many quads `pattern` matches under `visible?` -- the same number as
   `(count (query db pattern visible?))`, without building the set.

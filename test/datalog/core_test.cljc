@@ -434,3 +434,22 @@
                  (dl/q (index/empty-db)
                             '{:find [?n] :where [[?e :name ?n] [(eval ?n)]]}
                             (constantly true))))))
+
+(deftest comparison-predicates-fuse-into-a-value-range
+  (let [db (reduce (fn [d i]
+                     (assert-quad d {:s (str "p" i) :p "age" :o i}))
+                   (index/empty-db)
+                   (range 20))]
+    (is (= #{["p18"] ["p19"]}
+           (dl/q db {:find '[?s]
+                     :where '[[?s "age" ?a]
+                              [(>= ?a 18)]
+                              [(< ?a 20)]]}
+                 everything))
+        "fused [18, 20) agrees with the predicate form")
+    (is (= (dl/q db {:find '[?s]
+                     :where '[[?s "age" ?a]
+                              [(>= ?a 18)]
+                              [(< ?a 20)]]}
+                 everything)
+           (into #{} (map (fn [i] [(str "p" i)])) (range 18 20))))))
