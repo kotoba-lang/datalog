@@ -69,3 +69,14 @@
       (is (= 3 (count (q/query db [nil nil nil] admins-only?)))))
     (testing "an always-false visible? redacts everything"
       (is (= #{} (q/query db [nil nil nil] (constantly false)))))))
+
+(deftest query-range-matches-filtered-query
+  (let [db (reduce (fn [d i]
+                     (assert-quad d {:s (str "s" i) :p "age" :o i}))
+                   (index/empty-db)
+                   (range 10))
+        want (into #{} (filter #(and (>= (:o %) 3) (< (:o %) 7))
+                               (q/query db [nil "age" nil] everything)))]
+    (is (= want (q/query-range db "age" 3 7 everything)))
+    (is (not (some #(= 7 (:o %)) (q/query-range db "age" 3 7 everything)))
+        "hi exclusive")))

@@ -150,6 +150,22 @@
     (into #{} (filter visible?) (ds/scan db pattern))
     (query/query db pattern visible?)))
 
+(defn- scan-range*
+  "Resolve `[lo, hi)` on `attr` against `db`. Prefers `IRangeSource` so a
+  cursor or lake source can prune; degrades to an attribute scan plus
+  `in-range?` on any other `IPatternSource`; uses `query-range` on a
+  materialized index map."
+  [db attr lo hi opts visible?]
+  (cond
+    (satisfies? ds/IRangeSource db)
+    (into #{} (filter visible?) (ds/scan-range db attr lo hi opts))
+    (if (some? *pattern-source?*) *pattern-source?* (satisfies? ds/IPatternSource db))
+    (into #{}
+          (filter (fn [q] (and (visible? q) (ds/in-range? (:o q) lo hi opts))))
+          (ds/scan db [nil attr nil]))
+    :else
+    (query/query-range db attr lo hi visible? opts)))
+
 (defn- lvar?
   "True for a Datalog logic variable: a symbol whose name starts with `?`.
   `_` is the wildcard, not a variable -- it never binds."
@@ -274,6 +290,96 @@
 (defn- clause-result-binding [pred-clause] (second pred-clause))
 (defn- fn-call-sym [fn-call] (first fn-call))
 (defn- fn-call-args [fn-call] (vec (rest fn-call)))
+
+(def ^:private range-pred-ops '#{< > <= >=})
+
+(defn- range-clause?
+  "A fused value-interval clause produced by `fuse-value-ranges`."
+  [x]
+  (and (map? x) (contains? x :range/a)))
+
+(defn- range-pred-on
+  "If `clause` is `[(op ?v ground)]` with a comparison op, describe it."
+  [clause]
+  (when (and (predicate-clause? clause)
+             (nil? (clause-result-binding clause)))
+    (let [call (clause-fn-call clause)
+          op (fn-call-sym call)
+          args (fn-call-args call)]
+      (when (and (contains? range-pred-ops op)
+                 (= 2 (count args))
+                 (lvar? (first args))
+                 (not (lvar? (second args)))
+                 (not (wildcard? (second args))))
+        {:var (first args) :op op :bound (second args)}))))
+
+(defn- apply-range-op
+  [bounds {:keys [op bound]}]
+  (case op
+    >  (assoc bounds :lo bound :lo-open? true)
+    >= (assoc bounds :lo bound :lo-open? false)
+    <  (assoc bounds :hi bound :hi-open? true)
+    <= (assoc bounds :hi bound :hi-open? false)))
+
+(defn- fuse-value-ranges
+  "Rewrite `:where` so `[?e attr ?v]` plus later comparison predicates on
+  `?v` become one range clause, and those predicates are dropped.
+
+  Only fuses when `attr` is ground and the comparison's other argument is
+  ground. Unfusable clauses pass through unchanged, so a query with no
+  range predicates is byte-identical after this pass."
+  [where]
+  (let [where (vec where)
+        triples (vec (keep-indexed
+                      (fn [i c]
+                        (when (and (vector? c)
+                                   (not (predicate-clause? c))
+                                   (= 3 (count c)))
+                          (let [[e a v] c]
+                            (when (and (lvar? v)
+                                       (not (lvar? a))
+                                       (not (wildcard? a)))
+                              {:i i :e e :a a :v v}))))
+                      where))
+        by-var (reduce (fn [m t]
+                         (if (contains? m (:v t)) m (assoc m (:v t) t)))
+                       {} triples)
+        pred-at (into {}
+                      (keep-indexed
+                       (fn [i c]
+                         (when-let [p (range-pred-on c)]
+                           (when-let [t (get by-var (:var p))]
+                             (when (> i (:i t))
+                               [i p]))))
+                       where))]
+    (if (empty? pred-at)
+      where
+      (let [preds-by-var (reduce-kv (fn [m _ p]
+                                      (update m (:var p) (fnil conj []) p))
+                                    {} pred-at)
+            used-pred (set (keys pred-at))
+            fused-i (into #{} (keep (fn [[v t]]
+                                      (when (contains? preds-by-var v) (:i t)))
+                                    by-var))]
+        (into []
+              (keep-indexed
+               (fn [i c]
+                 (cond
+                   (contains? used-pred i) nil
+                   (contains? fused-i i)
+                   (let [t (first (filter #(= i (:i %)) triples))
+                         bounds (reduce apply-range-op
+                                        {:lo nil :hi nil :lo-open? false :hi-open? true}
+                                        (get preds-by-var (:v t)))]
+                     {:range/e (:e t)
+                      :range/a (:a t)
+                      :range/v (:v t)
+                      :range/lo (:lo bounds)
+                      :range/hi (:hi bounds)
+                      :range/lo-open? (:lo-open? bounds)
+                      :range/hi-open? (:hi-open? bounds)})
+                   :else c)))
+              where)))))
 
 (defn- eval-fn-call [binding fn-call]
   (let [fsym (fn-call-sym fn-call)
@@ -518,6 +624,27 @@
                                             (join-branch #{binding} branch db visible? extension-for cardinality))))
                             branches)))
             bindings))
+
+    (range-clause? clause)
+    (let [groups (group-by (fn [binding]
+                             {:a (substitute (:range/a clause) binding)
+                              :lo (substitute (:range/lo clause) binding)
+                              :hi (substitute (:range/hi clause) binding)
+                              :e (substitute (:range/e clause) binding)})
+                           bindings)
+          terms [(:range/e clause) (:range/a clause) (:range/v clause)]
+          opts {:lo-open? (:range/lo-open? clause)
+                :hi-open? (:range/hi-open? clause)}]
+      (into #{}
+            (mapcat (fn [[{:keys [a lo hi e]} group]]
+                      (let [rows (cond->> (scan-range* db a lo hi opts visible?)
+                                   (some? e) (filter #(= e (:s %))))]
+                        (mapcat (fn [binding]
+                                  (keep #(unify-positional binding terms
+                                                           [(:s %) (:p %) (:o %)])
+                                        rows))
+                                group))))
+            groups))
 
     :else
     ;; One `scan*` per DISTINCT substituted pattern, not one per binding.
@@ -884,7 +1011,8 @@
      (check-clause-safety! where (set in-syms))
      (doseq [[_ defs] parsed-rules] (doseq [{:keys [body]} defs] (check-clause-safety! body)))
      (check-unknown-rules! all-clauses parsed-rules)
-     (let [full (fixpoint db visible? parsed-rules)
+     (let [where (fuse-value-ranges where)
+           full (fixpoint db visible? parsed-rules)
            ;; With an aggregate in :find, binding MULTIPLICITY is observable --
            ;; `project` computes each aggregate over the bindings in its group,
            ;; so two bindings differing only in a column nobody reads are two
