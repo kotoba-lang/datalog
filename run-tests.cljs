@@ -1,0 +1,29 @@
+(ns run-tests
+  "The suite under ClojureScript.
+
+  datalog is the query layer arrangement moved out, and it is compiled into both live Workers.
+
+  This repo had no ClojureScript entry, so the murakumo fleet could only
+  gate its JVM half. Counts were measured to match before this was added --
+  that measurement, not the `.cljc` extension, is what earns a second gate.
+  Measured 2026-08-17 on datom-source: a portable suite can be green on the
+  JVM and red under nbb for reasons production does not have (SCI deftype
+  behaviour), so `.cljc` alone is not grounds.
+
+      npx nbb --classpath src:test run-tests.cljs"
+  (:require [cljs.test :as t]
+            [datalog.core-test]
+            [datalog.hash-join-test]
+            [datalog.index-test]
+            [datalog.order-limit-test]
+            [datalog.projection-test]
+            [datalog.query-cardinality-test]
+            [datalog.query-test]))
+
+(defmethod t/report [::t/default :end-run-tests] [m]
+  (when-not (t/successful? m)
+    (js/process.exit 1)))
+
+;; A pattern, not a second list of namespaces to run: a runner that repeats
+;; the list can fall behind the suite and report a subset as a pass.
+(t/run-all-tests #"^datalog\..*-test$")
