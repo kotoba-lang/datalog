@@ -158,6 +158,49 @@ anything.
   `:clause-cardinality` is a *hint a caller's own planner supplies* — it
   selects an execution strategy, never a clause order and never a semantics.
 
+## α-canonical form
+
+`datalog.core/normalize` renames every logic variable to `?0`, `?1`, … in order
+of first appearance and leaves everything else exactly as written, so
+
+```clojure
+(= (normalize a) (normalize b))
+```
+
+decides α-equivalence: two queries that differ only in what they call their
+variables are one value. A caller that content-addresses queries addresses the
+normal form rather than the text — **that caller is not this library**. There
+is no CID here (see "What this is NOT"), and a canonical *value* is precisely
+the seam that keeps it out; hand the result to whatever owns content addressing
+in your stack.
+
+Three things are deliberately not normalized away, because each is meaning
+rather than notation:
+
+| | why it stays |
+| --- | --- |
+| `:find` order | the projection — same columns in another order is another answer |
+| `:where` order | decides which queries are **legal**: safe negation is checked statically against it, so sorting clauses would change the accepted language, not the plan |
+| `:in` order | positional against `inputs` |
+
+So this is α-equivalence and nothing more. Two clause orders computing the same
+relation normalize differently. That is correct here rather than incomplete — a
+canonical form claiming more would have to be wrong somewhere, and quietly.
+
+`:rules` definitions are numbered in their own scope, since a rule's parameters
+are bound by the invocation rather than by the enclosing query; rule names, `_`,
+`$`, whitelisted function symbols and every literal pass through untouched.
+
+`:clause-cardinality` is renamed through the same map, **keys included** — it is
+keyed *by clause*, so renaming `:where` alone would leave every hint keyed to a
+clause that no longer occurs. That failure has no error and no wrong answer; the
+hints would simply stop matching and the query would get slower. Not reordering
+`:where` is what keeps those keys findable at all.
+
+A variable that appears only in `:order-by` or `:clause-cardinality`, with no
+binding site in `:in`/`:find`/`:where`, raises. Inventing a name for it would
+produce a canonical form for a query that cannot run.
+
 ## The relation model above this one
 
 A clause here is a **triple**: `[s p o]`, arity 3, and the positions are

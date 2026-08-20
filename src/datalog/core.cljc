@@ -946,6 +946,125 @@
                     (vec rows))]
       (if limit (vec (take limit ordered)) ordered))))
 
+
+;; ── α-canonical form ─────────────────────────────────────────────────────────
+
+(defn- ordered-lvars
+  "Logic variables in `form`, in source order, distinct.
+
+  Vectors, lists and sets are walked in their own order. **Maps are not walked
+  at all.** A Clojure map has no defined iteration order, so numbering a
+  variable by where it turned up inside one would make the canonical name
+  depend on hashing — a normalizer whose output varies by runtime is worse
+  than none, because two runtimes would content-address the same query
+  differently and neither would report a disagreement. The only map a query
+  carries is `:clause-cardinality`, whose keys are clauses that must already
+  appear in `:where`; it is renamed, never numbered."
+  [form]
+  (cond
+    (lvar? form)  [form]
+    (map? form)   []
+    (coll? form)  (into [] (comp (mapcat ordered-lvars) (distinct)) form)
+    :else         []))
+
+(defn- rename-lvars
+  "Substitute every logic variable in `form` through `m`, preserving
+  collection type and order.
+
+  List-ness is load-bearing, not cosmetic: `not-clause?`, `or-clause?`,
+  `or-join-clause?` and `rule-invocation?` all dispatch on `seq?`, so a
+  `(not [?e :a ?v])` rebuilt as a vector would silently stop being a negation
+  and start being a triple pattern with a symbol in entity position.
+
+  A variable absent from `m` is an error rather than a pass-through. It can
+  only arise from a query that names a variable in `:order-by` or
+  `:clause-cardinality` which no `:in`/`:find`/`:where` introduces — already
+  malformed, and inventing a name for it would produce a canonical form for a
+  query that cannot run."
+  [form m]
+  (cond
+    (lvar? form)   (or (get m form)
+                       (throw (ex-info "datalog.core/normalize: logic variable outside :in/:find/:where"
+                                       {:var form :known (vec (sort (keys m)))})))
+    (map? form)    (persistent!
+                    (reduce-kv (fn [acc k v]
+                                 (assoc! acc (rename-lvars k m) (rename-lvars v m)))
+                               (transient {}) form))
+    (vector? form) (mapv #(rename-lvars % m) form)
+    (set? form)    (into #{} (map #(rename-lvars % m)) form)
+    (seq? form)    (apply list (map #(rename-lvars % m) form))
+    :else          form))
+
+(defn- canonical-names [vars]
+  (zipmap vars (map #(symbol (str "?" %)) (range))))
+
+(defn- normalize-rule-definition
+  "One `[(rule-name ?param ...) clause ...]` definition, numbered in its own
+  scope.
+
+  A rule's parameters are bound by the invocation, not by the enclosing query,
+  so `[(anc ?a ?b) [?a :parent ?b]]` and `[(anc ?x ?y) [?x :parent ?y]]` are
+  the same rule and must reach the same canonical form regardless of what the
+  query around them calls its variables. The rule NAME is an ordinary symbol,
+  not a variable, and is left alone — `:where` refers to it by name."
+  [definition]
+  (rename-lvars definition (canonical-names (ordered-lvars definition))))
+
+(defn normalize
+  "α-canonical form of a query: every logic variable renamed to `?0`, `?1`, …
+  in order of first appearance, with everything else left exactly as written.
+
+  Two queries that differ only in what they call their variables normalize to
+  the identical value, so `(= (normalize a) (normalize b))` decides
+  α-equivalence, and a caller that content-addresses queries can address the
+  normal form instead of the text. **That caller is not this library** — see
+  the README's \"What this is NOT\": there is no CID here, and a canonical
+  value is exactly the seam that keeps it out. Hand the result to whatever
+  owns content addressing in your stack.
+
+  Numbering runs over `:in`, then `:find`, then `:where`, in that order. What
+  is deliberately NOT reordered:
+
+  - **`:find` order** is the projection. Two queries returning the same
+    columns in a different order return different answers.
+  - **`:where` order** decides which queries are legal at all. Safe negation
+    is checked statically against it — every variable inside a `(not …)` must
+    be bound by an EARLIER positive clause — so sorting clauses would change
+    the accepted language, not just the plan. It is also the join order the
+    caller owns (see `q`'s `:clause-cardinality` note).
+  - **`:in` order** is positional against `inputs`.
+
+  So this is α-equivalence and nothing more. It does not decide whether two
+  queries mean the same thing; two clause orders that compute the same
+  relation normalize differently, and that is correct here rather than
+  incomplete — a canonical form that claimed more would have to be wrong
+  somewhere, and quietly.
+
+  `:rules` definitions are each numbered in their OWN scope, because their
+  parameters are bound by invocation rather than by the enclosing query.
+  Rule names, `_`, `$`, whitelisted function symbols, keywords and every
+  literal value pass through untouched.
+
+  `:clause-cardinality` is renamed through the same map, keys included. It is
+  keyed BY CLAUSE, so renaming `:where` without it would leave every hint
+  keyed to a clause that no longer occurs — the hints would not error, they
+  would simply stop matching, and the only visible effect would be a slower
+  query. Not reordering `:where` is what makes those keys still findable."
+  [query]
+  (let [scoped (canonical-names
+                (into [] (comp cat (distinct))
+                      [(ordered-lvars (:in query))
+                       (ordered-lvars (:find query))
+                       (ordered-lvars (:where query))]))]
+    (cond-> query
+      (contains? query :in)     (update :in rename-lvars scoped)
+      (contains? query :find)   (update :find rename-lvars scoped)
+      (contains? query :where)  (update :where rename-lvars scoped)
+      (contains? query :order-by) (update :order-by rename-lvars scoped)
+      (contains? query :clause-cardinality)
+      (update :clause-cardinality rename-lvars scoped)
+      (contains? query :rules)
+      (update :rules #(mapv normalize-rule-definition %)))))
 (defn q
   "`{:find [?var ...] :in [?param ...] :where [[e a v] ...] :rules [...]}`
   over `db`. `visible?` is required and threaded into every underlying
