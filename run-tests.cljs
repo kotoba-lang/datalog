@@ -15,6 +15,7 @@
             [datalog.core-test]
             [datalog.hash-join-test]
             [datalog.index-test]
+            [datalog.normalize-test]
             [datalog.order-limit-test]
             [datalog.projection-test]
             [datalog.query-cardinality-test]
