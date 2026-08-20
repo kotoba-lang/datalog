@@ -158,6 +158,78 @@ anything.
   `:clause-cardinality` is a *hint a caller's own planner supplies* — it
   selects an execution strategy, never a clause order and never a semantics.
 
+## The relation model above this one
+
+A clause here is a **triple**: `[s p o]`, arity 3, and the positions are
+positional — they carry no labels. That is the whole relation model this
+library implements, and it is deliberately the smallest one that indexes.
+
+**It is not the relation model this workspace's own vocabulary describes.**
+A reader who opens this library and concludes "the relation model here is a
+triple" is reading the implementation correctly and the vocabulary wrongly.
+Recorded in `com-junkawasaki/root` ADR
+`adr-2608201500-incidence-is-the-vocabulary-the-query-engine-stops-at-triples`.
+
+One layer up, an incidence relation `i` has a **boundary**:
+
+```text
+∂(i) = List Endpoint,   Endpoint = {incidence, role, sign, mult}
+```
+
+- formalized in Lean 4 in [`com-junkawasaki/inc`](https://github.com/com-junkawasaki/inc)
+  (incidence structures, bisimulation, quotient descent — checked, not sketched);
+- fixed as vocabulary in `etzhayyim/architecture-framework`
+  (`resources/eaf/ontology.edn`: `:endpoint-required [:endpoint/incidence
+  :endpoint/role :endpoint/sign :endpoint/multiplicity]`, `:signs [-1 0 1]`);
+- and claimed by [`kotoba-lang/kotobase`](https://github.com/kotoba-lang/kotobase)
+  for every IPLD block, with `[e a v]` named as **the base case** — a minimal
+  incidence with three labelled endpoints, and a tree as the degenerate case
+  with one anonymous role.
+
+So the triple is not wrong; it is the **role-erased** projection of a richer
+relation. What erasure costs:
+
+| incidence | this library | recoverable later? |
+| --- | --- | --- |
+| `role` (a label per endpoint) | position 0/1/2 | no — positions cannot be re-labelled after the fact |
+| `sign` ∈ `{-1, 0, 1}` | absent | no |
+| `mult` (a role repeating) | absent | no |
+| `:incidence/kind` | `p`, when used that way | partly |
+
+None of that is a defect to fix here today. It is the altitude at which this
+library sits, stated so a reader does not mistake the floor for the ceiling.
+
+### Two signs that the model wants to be richer
+
+**`ref?` is a type trying to be born.** "The one cut" above records that this
+library *removed* the `ipld.core/link?` default and made `ref?` a required
+parameter, because no default is safe to guess. A distinction every caller
+must state, on every call, is a distinction that belongs in the value rather
+than in a threaded predicate — `Link` is already a first-class IPLD Data Model
+kind (`:link`, DAG-CBOR tag 42, code 8 in `kotoba-lang/lang/value-codec.edn`),
+so the value could carry it.
+
+**There are two clause kinds for one concept.** A triple clause `[?x :p ?y]`
+and a rule invocation `(rule-name ?x ?y)` both mean "this relation holds of
+these terms", and are handled by separate paths (`rule-invocation?` in
+`datalog.core`). An n-ary relation with labelled endpoints would be one kind.
+
+### What is deliberately *not* going to change
+
+Two properties of this library look like candidates for generalization and
+are not, because each buys something a richer model would have to buy back:
+
+- **`:where` is an ordered sequence, not a set.** `∧` is commutative, so a
+  canonically-sorted conjunction would content-address more cleanly. But safe
+  negation is checked *statically* by requiring every logic variable inside a
+  `(not …)` clause to be bound by an **earlier positive clause**. Reordering
+  changes which queries are accepted. A symmetry that costs a decidable check
+  is a loss, not an elegance.
+- **`visible?` stays required, and stays threaded through negation and
+  recursion.** A redacted fact and an absent fact must remain indistinguishable
+  to `not`. Any future relation IR must carry this; a purely value-theoretic
+  `Term/Atom/Rule` algebra does not carry it for free.
+
 ## Execution strategies
 
 These change how much work a query does, never what it answers. Each is
