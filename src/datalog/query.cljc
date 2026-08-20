@@ -1,8 +1,13 @@
 (ns datalog.query
   "`[s p o]` triple-pattern query with wildcards (nil) over a `datalog.index`
   db, routing to whichever index matches the bound positions -- bound subject
-  -> spo, bound predicate only -> pso, bound predicate + bound object -> pos,
-  bound object only -> honest full scan, fully unbound -> full spo scan.
+  -> `:eavt`, bound predicate only -> `:aevt`, bound predicate + bound object
+  -> `:avet`, bound object only -> honest full scan, fully unbound -> full
+  `:eavt` scan.
+
+  Every entry point here calls `index/check-shape!` first, so a db built by a
+  pre-rename `datalog` raises instead of scanning a `nil` index and reporting
+  zero rows as a successful answer.
 
   This is a pure routing function over `datalog.index`'s four indices. It has
   no storage of its own and reads only the in-memory db it is handed.
@@ -49,21 +54,22 @@
     ;; fell through to `:else` and returned the ENTIRE database, ignoring the
     ;; object it was given: a single-clause query answered wrongly, and a
     ;; Datalog clause of this shape produced an intermediate set of every
-    ;; datom. There is no index for it (`:ocp` covers only ref-valued objects,
+    ;; datom. There is no index for it (`:vaet` covers only ref-valued objects,
     ;; matching `assert-quad`'s `ref?`), so it is an honest O(database) scan --
     ;; but a correct one. Found by datom-source's conformance suite.
     (some? o)
-    (for [[s2 pm] (:spo db) [p2 os] pm o2 os :when (= o o2)]
+    (for [[s2 pm] (:eavt db) [p2 os] pm o2 os :when (= o o2)]
       {:s s2 :p p2 :o o2})
 
     :else
-    (for [[s2 pm] (:spo db) [p2 os] pm o2 os] {:s s2 :p p2 :o o2})))
+    (for [[s2 pm] (:eavt db) [p2 os] pm o2 os] {:s s2 :p p2 :o o2})))
 
 (defn query
   "`pattern` is `[s p o]`, any position `nil` for wildcard. `visible?` is
   applied as a post-filter over every candidate quad before it's returned
   -- see the ns docstring. Returns a set of matching `{:s :p :o}` quads."
   [db pattern visible?]
+  (index/check-shape! db)
   (into #{} (filter visible?) (query-seq db pattern)))
 
 (defn query-range
@@ -71,9 +77,10 @@
 
   Same `visible?` contract as `query`. Default interval is `[lo, hi)`
   (`:lo-open? false`, `:hi-open? true`). This is the in-memory form of
-  Datomic `index-range`; it filters `:pos` rather than cutting a tree."
+  Datomic `index-range`; it filters `:avet` rather than cutting a tree."
   ([db attr lo hi visible?] (query-range db attr lo hi visible? {}))
   ([db attr lo hi visible? opts]
+   (index/check-shape! db)
    (into #{}
          (comp (mapcat (fn [[s os]]
                          (map (fn [o] {:s s :p attr :o o}) os)))
@@ -94,6 +101,7 @@
   of `query-seq` walks its index once and each quad appears at one position in
   it. The equivalence test asserts that rather than assuming it."
   [db pattern visible?]
+  (index/check-shape! db)
   (count (filter visible? (query-seq db pattern))))
 
 (defn estimate-cardinality
@@ -114,6 +122,7 @@
   buckets. In particular, no `{:s :p :o}` maps are allocated and no set is
   built merely to learn a planning number."
   [db [s p o]]
+  (index/check-shape! db)
   (cond
     (some? s)
     (let [attrs (index/entity-attrs db s)]
@@ -129,17 +138,17 @@
     (some? p)
     (reduce-kv (fn [n _ os] (+ n (count os))) 0 (index/by-predicate db p))
 
-    ;; There is no general object index: :ocp intentionally contains only
+    ;; There is no general object index: :vaet intentionally contains only
     ;; ref-valued objects. Walk the subject/attribute buckets, but still avoid
     ;; allocating one quad per row as query-seq/cardinality must.
     (some? o)
     (reduce-kv (fn [n _ attrs]
                  (+ n (reduce-kv (fn [m _ os] (if (contains? os o) (inc m) m)) 0 attrs)))
                0
-               (:spo db))
+               (:eavt db))
 
     :else
     (reduce-kv (fn [n _ attrs]
                  (+ n (reduce-kv (fn [m _ os] (+ m (count os))) 0 attrs)))
                0
-               (:spo db))))
+               (:eavt db))))

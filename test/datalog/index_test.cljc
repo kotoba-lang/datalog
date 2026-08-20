@@ -9,7 +9,7 @@
             [datalog.index :as index]))
 
 (def ^:private no-refs
-  "This fixture's objects are never references -- nothing reaches `:ocp`."
+  "This fixture's objects are never references -- nothing reaches `:vaet`."
   (constantly false))
 
 (deftest assert-and-lookup
@@ -60,7 +60,7 @@
                  (apply index/retract-quad [(index/empty-db) {:s "a" :p "b" :o "c"}]))))
   (testing "(constantly false) is the no-reverse-index choice"
     (let [db (index/assert-quad (index/empty-db) {:s "a" :p "b" :o "c"} no-refs)]
-      (is (= {} (:ocp db)))
+      (is (= {} (:vaet db)))
       (is (= {} (index/refs-to db "c")))))
   (testing "(constantly true) reverse-indexes every object"
     (let [db (index/assert-quad (index/empty-db) {:s "a" :p "b" :o "c"} (constantly true))]
@@ -162,3 +162,42 @@
         "nil lo is unbounded")
     (is (= {"s8" #{8} "s9" #{9}}
            (index/by-predicate-range db "age" 8 nil {:hi-open? true})))))
+
+;; ---------------------------------------------------------------------------
+;; The rename's own safety net.
+;;
+;; Both directions, deliberately: a guard that only ever passes and a guard
+;; that only ever throws are the same amount of evidence, which is none.
+
+(def ^:private legacy-db
+  "What `empty-db` returned before the four indexes were renamed to their
+  sort orders. Written out as a literal on purpose -- reconstructing it by
+  renaming keys back would make this test agree with whatever the current
+  code happens to do."
+  {:spo {"alice" {"role" #{"admin"}}}
+   :pso {"role" {"alice" #{"admin"}}}
+   :pos {"role" {"admin" #{"alice"}}}
+   :ocp {}})
+
+(deftest legacy-shape-is-detected
+  (is (index/legacy-db? legacy-db))
+  (is (not (index/legacy-db? (index/empty-db))))
+  (is (not (index/legacy-db? nil)))
+  (testing "a half-migrated db -- old keys plus new ones -- is still legacy"
+    (is (index/legacy-db? (merge legacy-db (index/empty-db))))))
+
+(deftest legacy-shape-throws-instead-of-answering-zero
+  (testing "the failure this replaces: the renamed index simply is not there"
+    (is (nil? (:eavt legacy-db)))
+    (is (empty? (get (:eavt legacy-db) "alice" {}))))
+  (testing "so the guard raises, and names both what it found and what it wants"
+    (let [e (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                         (index/check-shape! legacy-db)))
+          d (ex-data e)]
+      (is (= :datalog.index/legacy-index-keys (:problem d)))
+      (is (= [:spo :pso :pos :ocp] (:found d)))
+      (is (= [:eavt :aevt :avet :vaet] (:expected d)))))
+  (testing "and a current db passes through unchanged"
+    (let [db (index/assert-quad (index/empty-db)
+                                {:s "alice" :p "role" :o "admin"} no-refs)]
+      (is (identical? db (index/check-shape! db))))))

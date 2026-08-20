@@ -5,7 +5,7 @@
 
 (defn- assert-quad
   "`datalog.index/assert-quad` with an explicit `ref?` -- these fixtures use
-  no reverse-reference lookup, so nothing is `:ocp`-indexed. `ref?` is a
+  no reverse-reference lookup, so nothing is `:vaet`-indexed. `ref?` is a
   required argument in this library (see `datalog.index`'s ns docstring):
   there is no implicit default to inherit."
   [db quad]

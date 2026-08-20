@@ -31,11 +31,46 @@ change. Removing those shims is a follow-up. The re-extraction above was
 needed because the two copies drifted 20 commits apart in silence; that
 cannot happen to a shim.
 
+## The four indexes are named for their sort orders
+
+`{:eavt :aevt :avet :vaet}`. They were `{:spo :pso :pos :ocp}` until
+2026-08-20, with the EAVT vocabulary carried alongside in prose — every
+docstring in this library had to translate between the two, and `ocp` → VAET
+is the translation that stopped being obvious (VAET is
+value-attribute-entity; `ocp` reads as object-something-predicate and says
+nothing about the order). One structure, one name.
+
+| index | key order | accessor |
+| --- | --- | --- |
+| `:eavt` | s → p → o | `entity-attrs` |
+| `:aevt` | p → s → o | `by-predicate` |
+| `:avet` | p → o → s | `by-predicate-value`, `by-predicate-range` |
+| `:vaet` | o → p → s | `refs-to` (ref-valued objects only) |
+
+**The `t` is a position this structure does not have.** A triple is
+`{:s :p :o}`; there is no transaction component, so nothing is sorted by
+one. The names are Datomic's four index names adopted whole, because that is
+how a reader of a triple store reads this shape — the trailing `t` marks the
+slot this library does not fill. The triple's own field names stay
+`:s`/`:p`/`:o`.
+
+### A pre-rename db raises instead of answering zero
+
+The renamed key is simply absent from a db built by an older `datalog`, so
+`(:eavt db)` is `nil`, so the scan is empty, so the query **answers zero rows
+and reports success**. Every entry point in `datalog.query` therefore calls
+`datalog.index/check-shape!` first — one `contains?` per query — and a
+pre-rename db gets an `ex-info` naming both the keys it found and the keys it
+wanted. `datalog.index/legacy-db?` is the predicate on its own.
+
+This is what makes the rename safe to land before every consumer's west pin
+has moved: the skew is loud.
+
 ## Namespaces
 
 | ns | what it is | requires |
 | --- | --- | --- |
-| `datalog.index` | the four covering indexes `{:spo :pso :pos :ocp}` — EAVT/AEVT/AVET/VAET in Datomic's vocabulary | nothing |
+| `datalog.index` | the four covering indexes `{:eavt :aevt :avet :vaet}` — named for their sort orders | nothing |
 | `datalog.query` | single `[s p o]` triple pattern with `nil` wildcards, routed to whichever index has the bound positions leading; `cardinality` counts a pattern's matches without materialising them | `datalog.index` |
 | `datalog.core` | the Datalog engine: multi-clause join, `:find`/`:in`/`:where`/`:rules`/`:order-by`/`:limit` | `datalog.query`, `datom.source` |
 
@@ -72,7 +107,7 @@ hidden fact's presence by testing its absence.
 
 In `arrangement`, `assert-quad`/`retract-quad` had an arity-2 form that
 defaulted `ref?` — the predicate deciding whether an object also gets a
-reverse-reference (`:ocp`) entry — to `ipld.core/link?`. That default was the
+reverse-reference (`:vaet`) entry — to `ipld.core/link?`. That default was the
 **only** reason the quad index depended on IPLD; the index itself never did
 anything with a Link beyond calling a predicate on it.
 
@@ -181,10 +216,10 @@ Stated because they are real, not because they are planned:
 - **Aggregates are a fixed set:** `count`, `count-distinct`, `sum`, `avg`,
   `min`, `max`.
 - **`[_ _ o]` — bound object only — is an honest O(database) scan.** There is
-  no index for it: `:ocp` covers only objects an `assert-quad` caller marked
+  no index for it: `:vaet` covers only objects an `assert-quad` caller marked
   as refs. Correct, but linear.
 - **`retract-quad` must be given a `ref?` that agrees with the one used to
-  assert the same quad,** or the `:ocp` entry is left behind. Nothing
+  assert the same quad,** or the `:vaet` entry is left behind. Nothing
   enforces this.
 - **Values are opaque for indexing, except range.** s/p/o are map keys.
  `<`/`>` still exist as predicate clause functions over already-bound

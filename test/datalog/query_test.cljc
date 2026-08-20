@@ -5,7 +5,7 @@
 
 (defn- assert-quad
   "`datalog.index/assert-quad` with an explicit `ref?` -- these fixtures use
-  no reverse-reference lookup, so nothing is `:ocp`-indexed. `ref?` is a
+  no reverse-reference lookup, so nothing is `:vaet`-indexed. `ref?` is a
   required argument in this library (see `datalog.index`'s ns docstring):
   there is no implicit default to inherit."
   [db quad]
@@ -20,7 +20,7 @@
 
 (def ^:private everything (constantly true))
 
-(deftest bound-subject-routes-to-spo
+(deftest bound-subject-routes-to-eavt
   (let [db (fixture-db)]
     (is (= #{{:s "alice" :p "role" :o "admin"} {:s "alice" :p "name" :o "Alice"}}
            (q/query db ["alice" nil nil] everything)))
@@ -28,14 +28,14 @@
            (q/query db ["alice" "role" nil] everything)))
     (is (= #{} (q/query db ["alice" "role" "user"] everything)))))
 
-(deftest bound-predicate-only-routes-to-pso
+(deftest bound-predicate-only-routes-to-aevt
   (let [db (fixture-db)]
     (is (= #{{:s "alice" :p "role" :o "admin"}
              {:s "bob" :p "role" :o "user"}
              {:s "carol" :p "role" :o "admin"}}
            (q/query db [nil "role" nil] everything)))))
 
-(deftest bound-predicate-and-object-routes-to-pos
+(deftest bound-predicate-and-object-routes-to-avet
   (let [db (fixture-db)]
     (is (= #{{:s "alice" :p "role" :o "admin"} {:s "carol" :p "role" :o "admin"}}
            (q/query db [nil "role" "admin"] everything)))))
@@ -80,3 +80,40 @@
     (is (= want (q/query-range db "age" 3 7 everything)))
     (is (not (some #(= 7 (:o %)) (q/query-range db "age" 3 7 everything)))
         "hi exclusive")))
+
+;; ---------------------------------------------------------------------------
+;; Every query entry point refuses a pre-rename db.
+;;
+;; This is the case the rename could have introduced silently: the old key is
+;; gone, so the index reads as `nil`, so the scan is empty, so the query
+;; answers zero rows and calls it success. Each of these four assertions is a
+;; wrong answer that the guard converts into an error.
+
+(def ^:private legacy-db
+  {:spo {"alice" {"role" #{"admin"}}}
+   :pso {"role" {"alice" #{"admin"}}}
+   :pos {"role" {"admin" #{"alice"}}}
+   :ocp {}})
+
+(deftest every-entry-point-refuses-a-pre-rename-db
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+               (q/query legacy-db ["alice" nil nil] everything)))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+               (q/query-range legacy-db "role" nil nil everything)))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+               (q/cardinality legacy-db [nil "role" nil] everything)))
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+               (q/estimate-cardinality legacy-db [nil "role" nil]))))
+
+(deftest the-silent-answer-the-guard-replaces
+  (testing "without the guard each of these would have been a successful nil-scan"
+    (is (nil? (:eavt legacy-db)))
+    (is (empty? (for [[s pm] (:eavt legacy-db) [p os] pm o os] {:s s :p p :o o})))
+    (is (= #{"alice"} (get-in legacy-db [:pos "role" "admin"]))
+        "the rows were there the whole time -- under the old key")))
+
+(deftest current-db-still-answers
+  (let [db (fixture-db)]
+    (is (= 2 (q/cardinality db [nil "role" "admin"] everything)))
+    (is (= #{{:s "alice" :p "role" :o "admin"}}
+           (q/query db ["alice" "role" nil] everything)))))

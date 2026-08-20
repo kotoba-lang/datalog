@@ -12,7 +12,7 @@
 (def ^:private no-refs
   "`datalog.index/assert-quad`'s `ref?`, which is REQUIRED here (arrangement
   defaulted it to `ipld.core/link?`; this library has no IPLD to default to).
-  These fixtures use no reverse-reference lookup, so nothing is `:ocp`-indexed."
+  These fixtures use no reverse-reference lookup, so nothing is `:vaet`-indexed."
   (constantly false))
 
 (defn- db []
