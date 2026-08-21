@@ -201,6 +201,60 @@ A variable that appears only in `:order-by` or `:clause-cardinality`, with no
 binding site in `:in`/`:find`/`:where`, raises. Inventing a name for it would
 produce a canonical form for a query that cannot run.
 
+### Canonical form — `canonicalize`
+
+`normalize` removes variable names. `canonicalize` additionally removes the
+three orders this engine does not read, and **throws** rather than returning an
+approximation when it cannot. Two functions rather than one flag, because a
+caller has to know which contract it got.
+
+Each of the three was measured, not taken from a docstring — permuting it
+leaves `q`'s answer identical:
+
+| position | why order is not read |
+| --- | --- |
+| `(or b1 b2 …)` | branches are alternatives checked against the same outer bindings, then unioned |
+| `(or-join [v] b1 b2 …)` | as above, plus the declared shared vars |
+| `:rules` definitions | alternatives of one name, unioned to a least fixpoint |
+
+The control matters as much as the cases: reordering `:where` changes whether
+the query is **accepted**, and the suite asserts that it still throws. If that
+control ever stops throwing, the distinction this rests on is gone.
+
+`(and c1 c2)` inside a branch is a conjunction and is not permuted.
+
+#### Why the minimum over an orbit, rather than sorting each position
+
+Renaming numbers variables by first appearance, so it depends on branch order;
+sorting branches depends on the names. Sort-then-rename and rename-then-sort
+each leave pairs that do not converge. Minimising over the orbit has no such
+dependency: every order is renamed, and the smallest result is the same value
+whichever order was written.
+
+The orbit is a product of factorials, so it is bounded (`orbit-limit`, 5040)
+and exceeding it **refuses**. A minimum over a prefix of the orbit cannot be
+told from a real one.
+
+#### The comparator does not use `pr-str`
+
+A set and a map have no defined iteration order, so ordering by printed text
+makes the answer depend on the host. Measured 2026-08-21:
+
+```clojure
+#{:zebra :apple :mango :kiwi :cherry :banana}
+;; JVM  #{:cherry :mango :apple :zebra :kiwi :banana}
+;; nbb  #{:zebra :apple :mango :kiwi :cherry :banana}
+```
+
+Sets and maps are compared through their own sorted contents instead, which is
+defined everywhere. `arrangement` records the same hazard on its key path,
+where two byte arrays with identical contents blinded differently.
+
+This is asserted by pinning **which** branch wins for a set-valued query, so
+the JVM and nbb suites cannot both pass unless the ordering is by content.
+Substituting `pr-str` back in is 0 failures on the JVM and 2 under nbb — one
+defect, visible from one host.
+
 ## The relation model above this one
 
 A clause here is a **triple**: `[s p o]`, arity 3, and the positions are

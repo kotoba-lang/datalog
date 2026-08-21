@@ -1065,6 +1065,138 @@
       (update :clause-cardinality rename-lvars scoped)
       (contains? query :rules)
       (update :rules #(mapv normalize-rule-definition %)))))
+
+;; ── canonical form over the order-irrelevant positions ───────────────────────
+
+(defn- type-rank
+  "A total order across kinds, so `compare-forms` never compares apples to
+  pears. List and vector are ranked apart on purpose: list-ness decides whether
+  a form is a negation, a disjunction or a rule invocation, so two forms that
+  differ only in it are genuinely different clauses."
+  [x]
+  (cond (nil? x) 0 (boolean? x) 1 (number? x) 2 (string? x) 3
+        (keyword? x) 4 (symbol? x) 5 (vector? x) 6 (seq? x) 7
+        (set? x) 8 (map? x) 9
+        :else (throw (ex-info "datalog.core/canonicalize: value outside the orderable subset"
+                              {:value x :type (type x)}))))
+
+(declare compare-forms)
+
+(defn- compare-seqs [a b]
+  (or (first (remove zero? (map compare-forms a b)))
+      (compare (count a) (count b))))
+
+(defn- compare-forms
+  "A total order over the EDN a query is made of.
+
+  `pr-str` would have been shorter and is not available: a set or a map has no
+  defined iteration order, so ordering by printed text makes the answer depend
+  on the host. `arrangement` records the same hazard on its key path, where two
+  byte arrays with identical contents blinded differently. Sets and maps here
+  are compared through their own sorted contents, which is defined everywhere."
+  [a b]
+  (let [ra (type-rank a) rb (type-rank b)]
+    (if (not= ra rb)
+      (compare ra rb)
+      (case ra
+        (0) 0
+        (1) (compare a b)
+        (2) (compare a b)
+        (3) (compare a b)
+        (4 5) (compare (str a) (str b))
+        (6 7) (compare-seqs a b)
+        (8) (compare-seqs (sort compare-forms a) (sort compare-forms b))
+        (9) (compare-seqs (map (fn [[k v]] [k v]) (sort-by key compare-forms a))
+                          (map (fn [[k v]] [k v]) (sort-by key compare-forms b)))))))
+
+(defn- permutations [coll]
+  (if (<= (count coll) 1)
+    [(vec coll)]
+    (for [i (range (count coll))
+          p (permutations (concat (take i coll) (drop (inc i) coll)))]
+      (into [(nth coll i)] p))))
+
+(defn- cartesian [colls]
+  (if (empty? colls)
+    [()]
+    (for [x (first colls) more (cartesian (rest colls))] (cons x more))))
+
+(defn- form-variants
+  "Every rewriting of `form` that differs only in an order this engine does not
+  read.
+
+  Exactly three such positions exist, and each was measured rather than taken
+  from a docstring -- permuting it leaves `q`'s answer identical, while
+  permuting `:where` changes whether the query is ACCEPTED at all:
+
+    (or b1 b2 ...)             branches are alternatives checked against the
+    (or-join [v] b1 b2 ...)    same outer bindings, then unioned
+    :rules definitions         alternatives of one name, unioned to a fixpoint
+
+  `(and c1 c2)` inside a branch is NOT permuted: it is a conjunction, and a
+  clause in it may rely on one earlier in the same branch."
+  [form]
+  (cond
+    (or (or-clause? form) (or-join-clause? form))
+    (let [head (if (or-join-clause? form) (take 2 form) (take 1 form))
+          branches (if (or-join-clause? form) (or-join-branches form) (or-branches form))]
+      (for [bs (cartesian (map form-variants branches))
+            p (permutations bs)]
+        (apply list (concat head p))))
+
+    (vector? form) (map vec (cartesian (map form-variants form)))
+    (seq? form) (map #(apply list %) (cartesian (map form-variants form)))
+    :else [form]))
+
+(def orbit-limit
+  "How many rewritings `canonicalize` will consider before refusing.
+
+  It picks the minimum over an orbit, so the orbit has to be enumerated, and
+  the size is a product of factorials. Real queries sit far below this -- two
+  disjunctions of three branches each is 72 -- but the bound is a refusal
+  rather than a truncation: silently canonicalising over a PREFIX of the orbit
+  would return a value that is not the minimum and cannot be told from one
+  that is."
+  5040)
+
+(defn- query-variants [query]
+  (let [wheres (if (contains? query :where) (form-variants (:where query)) [::absent])
+        rules  (if (contains? query :rules)
+                 (for [defs (permutations (:rules query))
+                       bodies (cartesian (map form-variants defs))]
+                   (vec bodies))
+                 [::absent])]
+    (for [w wheres r rules]
+      (cond-> query
+        (not= ::absent w) (assoc :where w)
+        (not= ::absent r) (assoc :rules r)))))
+
+(defn canonicalize
+  "`normalize`, and additionally minimal over the orders this engine does not
+  read. Throws when the orbit exceeds `orbit-limit`.
+
+  `normalize` decides α-equivalence and is total. This decides α-equivalence
+  PLUS the three order-irrelevant positions above, and is partial -- the two
+  contracts are separate functions rather than one flag because a caller has
+  to know which of them it got.
+
+  The minimum is taken over the orbit rather than by sorting each position in
+  place, and that is not fussiness. Renaming numbers variables by first
+  appearance, so it depends on branch order; sorting branches depends on the
+  names. Sorting-then-renaming and renaming-then-sorting each leave pairs that
+  do not converge. Minimising over the orbit has no such dependency: every
+  order is renamed, and the smallest result is the same value whichever order
+  was written.
+
+  What is NOT reordered stays exactly as `normalize` leaves it -- `:find`
+  (the projection), `:in` (positional against `inputs`), `:where` (whose order
+  decides which queries are legal), and `(and ...)` inside a branch."
+  [query]
+  (let [vs (take (inc orbit-limit) (query-variants query))]
+    (when (> (count vs) orbit-limit)
+      (throw (ex-info "datalog.core/canonicalize: orbit exceeds the limit -- refusing to return a value that is not the minimum"
+                      {:limit orbit-limit})))
+    (reduce (fn [a b] (if (neg? (compare-forms b a)) b a)) (map normalize vs))))
 (defn q
   "`{:find [?var ...] :in [?param ...] :where [[e a v] ...] :rules [...]}`
   over `db`. `visible?` is required and threaded into every underlying

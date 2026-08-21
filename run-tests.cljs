@@ -14,6 +14,7 @@
   (:require [cljs.test :as t]
             [datalog.core-test]
             [datalog.hash-join-test]
+            [datalog.canonicalize-test]
             [datalog.index-test]
             [datalog.normalize-test]
             [datalog.order-limit-test]
