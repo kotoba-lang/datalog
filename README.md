@@ -97,6 +97,12 @@ range fusion, ordering, and limits await the source at scan boundaries; the
 engine does not materialize an async source into an in-memory db. The
 synchronous `q` remains unchanged.
 
+Independent substituted pattern/range scans in one join step run with
+adaptive width `min(distinct-patterns, 8)`. Larger binding groups start first
+to reduce the tail, while `:where` clause order and query semantics remain
+unchanged. The bound prevents unbounded provider fan-out; a remote block layer
+should also coalesce concurrent reads for the same content identifier.
+
 The third argument to `q` (and to `datalog.query/query`) is `visible?`, and
 it is **required**. There is no permissive-default arity. A query is not a
 bare read: a caller must state a visibility decision, even if that decision

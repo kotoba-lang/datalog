@@ -78,3 +78,62 @@
           (.catch (fn [e]
                     (is (re-find #"unsafe negation" (.-message e)))
                     (done)))))))
+
+(deftest keyed-join-scans-run-concurrently-with-a-hard-bound
+  (async done
+    (let [entities (mapv #(str "e" %) (range 12))
+          quads (into (mapv (fn [e] {:s e :p "kind" :o "common"}) entities)
+                      (mapv (fn [e] {:s e :p "score" :o 1}) entities))
+          active (atom 0)
+          peak (atom 0)
+          source
+          (reify source/IAsyncPatternSource
+            (-scan-async [_ pattern]
+              (if (= "score" (second pattern))
+                (js/Promise.
+                 (fn [resolve _reject]
+                   (let [now (swap! active inc)]
+                     (swap! peak max now)
+                     (js/setTimeout
+                      (fn []
+                        (swap! active dec)
+                        (resolve (into #{} (filter #(matches? % pattern)) quads)))
+                      5))))
+                (js/Promise.resolve
+                 (into #{} (filter #(matches? % pattern)) quads)))))]
+      (-> (d/q-async source
+                     {:find '[?e ?score]
+                      :where '[[?e "kind" "common"]
+                               [?e "score" ?score]]}
+                     everything)
+          (.then (fn [rows]
+                   (is (= 12 (count rows)))
+                   (is (> @peak 1) "independent keyed scans overlap")
+                   (is (<= @peak 8) "join fan-out is capped at eight scans")
+                   (done)))
+          (.catch (fn [e]
+                    (is false (str "parallel q-async threw: " (or (.-stack e) e)))
+                    (done)))))))
+
+(deftest keyed-scan-failure-rejects-the-query
+  (async done
+    (let [quads [{:s "ok" :p "kind" :o "common"}
+                 {:s "bad" :p "kind" :o "common"}]
+          source
+          (reify source/IAsyncPatternSource
+            (-scan-async [_ pattern]
+              (if (= ["bad" "score" nil] pattern)
+                (js/Promise.reject (js/Error. "provider failed"))
+                (js/Promise.resolve
+                 (into #{} (filter #(matches? % pattern)) quads)))))]
+      (-> (d/q-async source
+                     {:find '[?e ?score]
+                      :where '[[?e "kind" "common"]
+                               [?e "score" ?score]]}
+                     everything)
+          (.then (fn [_]
+                   (is false "a failed keyed scan must reject the whole query")
+                   (done)))
+          (.catch (fn [e]
+                    (is (= "provider failed" (.-message e)))
+                    (done)))))))

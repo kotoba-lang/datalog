@@ -1293,6 +1293,54 @@
                (js/Promise.resolve init)
                xs))
 
+     (def ^:private max-async-scan-concurrency
+       "Maximum independent cursor scans started by one join step.
+
+       Eight is deliberately a bound, not a claim that more parallelism is
+       always faster: Worker connections, provider rate limits, and shared
+       upper tree blocks are finite resources. The actual width adapts down to
+       the number of distinct substituted patterns in the step."
+       8)
+
+     (defn- scan-work-plan
+       "Independent scan groups, longest local extension work first.
+
+       A group with more bindings does more unification after its network read.
+       Starting those groups first reduces the tail when the bounded workers
+       have uneven work, without changing clause order or query semantics."
+       [groups]
+       (sort-by (fn [[_ bindings]] (- (count bindings))) groups))
+
+     (defn- map-bounded-async
+       "Promise map with adaptive width `min(count(xs), 8)`.
+
+       Rejects as soon as a worker rejects. Already-started effects cannot be
+       cancelled by native Promise, but no further item is scheduled by that
+       worker after rejection. Results retain input order for deterministic
+       tests even though callers normally union sets."
+       [f xs]
+       (let [items (vec xs)
+             n (count items)
+             width (min n max-async-scan-concurrency)
+             next-index (atom -1)
+             cancelled? (atom false)
+             results (atom (vec (repeat n nil)))]
+         (if (zero? n)
+           (js/Promise.resolve [])
+           (letfn [(worker []
+                     (let [i (swap! next-index inc)]
+                       (if (and (not @cancelled?) (< i n))
+                         (-> (js/Promise.resolve (f (nth items i)))
+                             (.then (fn [result]
+                                      (swap! results assoc i result)
+                                      (worker)))
+                             (.catch (fn [e]
+                                       (reset! cancelled? true)
+                                       (throw e))))
+                         (js/Promise.resolve nil))))]
+             (-> (js/Promise.all (into-array (repeatedly width worker)))
+                 (.then (fn [_] @results)))))))
+
      (defn- scan*-async [db pattern visible?]
        (if (satisfies? ds/IAsyncPatternSource db)
          (-> (ds/scan-async db pattern)
@@ -1352,13 +1400,17 @@
        ([bindings clause db visible? extension-for cardinality]
         (cond
           (not-clause? clause)
-          (let [pattern (negated-pattern clause)]
-            (reduce-async
-             (fn [kept binding]
-               (-> (scan*-async db (mapv #(substitute % binding) pattern) visible?)
-                   (.then #(if (seq %) kept (conj kept binding)))))
-             #{}
-             bindings))
+          (let [pattern (negated-pattern clause)
+                groups (group-by
+                        (fn [binding]
+                          (mapv #(substitute % binding) pattern))
+                        bindings)]
+            (-> (map-bounded-async
+                 (fn [[substituted group]]
+                   (-> (scan*-async db substituted visible?)
+                       (.then #(if (seq %) #{} (set group)))))
+                 (scan-work-plan groups))
+                (.then #(into #{} cat %))))
 
           (rule-invocation? clause)
           (let [args (rule-args clause)
@@ -1434,22 +1486,22 @@
                 terms [(:range/e clause) (:range/a clause) (:range/v clause)]
                 opts {:lo-open? (:range/lo-open? clause)
                       :hi-open? (:range/hi-open? clause)}]
-            (reduce-async
-             (fn [acc [{:keys [a lo hi e]} group]]
-               (-> (scan-range*-async db a lo hi opts visible?)
-                   (.then
-                    (fn [scanned]
-                      (let [rows (cond->> scanned
-                                   (some? e) (filter #(= e (:s %))))]
-                        (into acc
-                              (mapcat
-                               (fn [binding]
-                                 (keep #(unify-positional
-                                         binding terms [(:s %) (:p %) (:o %)])
-                                       rows))
-                               group)))))))
-             #{}
-             groups))
+            (-> (map-bounded-async
+                 (fn [[{:keys [a lo hi e]} group]]
+                   (-> (scan-range*-async db a lo hi opts visible?)
+                       (.then
+                        (fn [scanned]
+                          (let [rows (cond->> scanned
+                                       (some? e) (filter #(= e (:s %))))]
+                            (into #{}
+                                  (mapcat
+                                   (fn [binding]
+                                     (keep #(unify-positional
+                                             binding terms [(:s %) (:p %) (:o %)])
+                                           rows))
+                                   group)))))))
+                 (scan-work-plan groups))
+                (.then #(into #{} cat %))))
 
           :else
           (let [groups (group-by
@@ -1460,20 +1512,20 @@
             (if (and card
                      (<= card (* hash-join-row-budget (count groups))))
               (hash-join-rows-async groups clause db visible?)
-              (reduce-async
-               (fn [acc [pattern group]]
-                 (-> (scan*-async db pattern visible?)
-                     (.then
-                      (fn [rows]
-                        (into acc
-                              (mapcat
-                               (fn [binding]
-                                 (keep #(unify-positional
-                                         binding clause [(:s %) (:p %) (:o %)])
-                                       rows))
-                               group))))))
-               #{}
-               groups))))))
+              (-> (map-bounded-async
+                   (fn [[pattern group]]
+                     (-> (scan*-async db pattern visible?)
+                         (.then
+                          (fn [rows]
+                            (into #{}
+                                  (mapcat
+                                   (fn [binding]
+                                     (keep #(unify-positional
+                                             binding clause [(:s %) (:p %) (:o %)])
+                                           rows))
+                                   group))))))
+                   (scan-work-plan groups))
+                  (.then #(into #{} cat %))))))))
 
      (defn- eval-body-variant-async
        [db visible? body full-map delta-map delta-idx]
