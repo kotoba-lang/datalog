@@ -12,6 +12,7 @@
 
       npx nbb --classpath src:test run-tests.cljs"
   (:require [cljs.test :as t]
+            [datalog.async-test]
             [datalog.core-test]
             [datalog.hash-join-test]
             [datalog.canonicalize-test]

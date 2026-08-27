@@ -90,6 +90,13 @@ has moved: the skew is loud.
 ;; => #{["Alice"]}
 ```
 
+On ClojureScript, `q-async` accepts a
+`datom.source/IAsyncPatternSource` and returns a Promise with the same query
+semantics. Joins, safe negation, disjunction, recursive rules, aggregates,
+range fusion, ordering, and limits await the source at scan boundaries; the
+engine does not materialize an async source into an in-memory db. The
+synchronous `q` remains unchanged.
+
 The third argument to `q` (and to `datalog.query/query`) is `visible?`, and
 it is **required**. There is no permissive-default arity. A query is not a
 bare read: a caller must state a visibility decision, even if that decision

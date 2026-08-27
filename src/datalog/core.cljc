@@ -1281,3 +1281,324 @@
                             #{initial-binding}
                             (map-indexed vector where))]
        (order+limit (project bindings find) find order-by limit))))))
+
+#?(:cljs
+   (do
+     (defn- reduce-async
+       "Promise-aware left fold. Each step may return either a value or a
+       Promise; the next step never runs until it settles."
+       [f init xs]
+       (reduce (fn [p x]
+                 (.then p (fn [acc] (js/Promise.resolve (f acc x)))))
+               (js/Promise.resolve init)
+               xs))
+
+     (defn- scan*-async [db pattern visible?]
+       (if (satisfies? ds/IAsyncPatternSource db)
+         (-> (ds/scan-async db pattern)
+             (.then #(into #{} (filter visible?) %)))
+         (js/Promise.resolve (scan* db pattern visible?))))
+
+     (defn- scan-range*-async [db attr lo hi opts visible?]
+       (if (satisfies? ds/IAsyncPatternSource db)
+         (-> (ds/scan-range-async db attr lo hi opts)
+             (.then #(into #{} (filter visible?) %)))
+         (js/Promise.resolve (scan-range* db attr lo hi opts visible?))))
+
+     (defn- hash-join-rows-async [groups clause db visible?]
+       (-> (scan*-async db (broad-pattern clause) visible?)
+           (.then
+            (fn [scanned]
+              (let [rows (into [] (map (fn [q] [(:s q) (:p q) (:o q)])) scanned)
+                    indexes (into {}
+                                  (map (fn [positions]
+                                         [positions
+                                          (group-by (fn [r]
+                                                      (mapv #(nth r %) positions))
+                                                    rows)]))
+                                  (distinct
+                                   (map (fn [[pattern _]]
+                                          (bound-positions pattern clause))
+                                        groups)))]
+                (into #{}
+                      (mapcat
+                       (fn [[pattern group]]
+                         (let [positions (bound-positions pattern clause)
+                               key (mapv #(nth pattern %) positions)
+                               matched (if (seq positions)
+                                         (get (get indexes positions) key)
+                                         rows)]
+                           (mapcat (fn [binding]
+                                     (keep #(unify-positional binding clause %)
+                                           matched))
+                                   group))))
+                      groups))))))
+
+     (declare join-clause-async)
+
+     (defn- join-branch-async
+       [bindings branch db visible? extension-for cardinality]
+       (if (and-clause? branch)
+         (reduce-async
+          (fn [bs clause]
+            (join-clause-async bs clause db visible? extension-for cardinality))
+          bindings
+          (and-clauses branch))
+         (join-clause-async bindings branch db visible? extension-for cardinality)))
+
+     (defn ^:private join-clause-async
+       ([bindings clause db visible? extension-for]
+        (join-clause-async bindings clause db visible? extension-for nil))
+       ([bindings clause db visible? extension-for cardinality]
+        (cond
+          (not-clause? clause)
+          (let [pattern (negated-pattern clause)]
+            (reduce-async
+             (fn [kept binding]
+               (-> (scan*-async db (mapv #(substitute % binding) pattern) visible?)
+                   (.then #(if (seq %) kept (conj kept binding)))))
+             #{}
+             bindings))
+
+          (rule-invocation? clause)
+          (let [args (rule-args clause)
+                extension (extension-for (rule-name clause))]
+            (js/Promise.resolve
+             (into #{}
+                   (mapcat
+                    (fn [binding]
+                      (let [substituted (mapv #(substitute % binding) args)
+                            matches? (fn [tuple]
+                                       (every? true?
+                                               (map (fn [want got]
+                                                      (or (nil? want) (= want got)))
+                                                    substituted tuple)))]
+                        (keep #(unify-positional binding args %)
+                              (filter matches? extension))))
+                   bindings))))
+
+          (predicate-clause? clause)
+          (let [fn-call (clause-fn-call clause)
+                result-binding (clause-result-binding clause)]
+            (js/Promise.resolve
+             (if result-binding
+               (into #{}
+                     (keep (fn [binding]
+                             (unify-positional
+                              binding [result-binding]
+                              [(eval-fn-call binding fn-call)])))
+                     bindings)
+               (into #{} (filter #(eval-fn-call % fn-call)) bindings))))
+
+          (or-clause? clause)
+          (reduce-async
+           (fn [acc branch]
+             (-> (join-branch-async bindings branch db visible?
+                                    extension-for cardinality)
+                 (.then #(into acc %))))
+           #{}
+           (or-branches clause))
+
+          (or-join-clause? clause)
+          (let [shared-vars (set (or-join-vars clause))
+                branches (or-join-branches clause)]
+            (reduce-async
+             (fn [acc binding]
+               (reduce-async
+                (fn [branch-acc branch]
+                  (-> (join-branch-async #{binding} branch db visible?
+                                         extension-for cardinality)
+                      (.then
+                       (fn [extended-bindings]
+                         (into branch-acc
+                               (map (fn [extended]
+                                      (reduce (fn [b v]
+                                                (if (contains? extended v)
+                                                  (assoc b v (get extended v))
+                                                  b))
+                                              binding shared-vars)))
+                               extended-bindings)))))
+                acc
+                branches))
+             #{}
+             bindings))
+
+          (range-clause? clause)
+          (let [groups (group-by
+                        (fn [binding]
+                          {:a (substitute (:range/a clause) binding)
+                           :lo (substitute (:range/lo clause) binding)
+                           :hi (substitute (:range/hi clause) binding)
+                           :e (substitute (:range/e clause) binding)})
+                        bindings)
+                terms [(:range/e clause) (:range/a clause) (:range/v clause)]
+                opts {:lo-open? (:range/lo-open? clause)
+                      :hi-open? (:range/hi-open? clause)}]
+            (reduce-async
+             (fn [acc [{:keys [a lo hi e]} group]]
+               (-> (scan-range*-async db a lo hi opts visible?)
+                   (.then
+                    (fn [scanned]
+                      (let [rows (cond->> scanned
+                                   (some? e) (filter #(= e (:s %))))]
+                        (into acc
+                              (mapcat
+                               (fn [binding]
+                                 (keep #(unify-positional
+                                         binding terms [(:s %) (:p %) (:o %)])
+                                       rows))
+                               group)))))))
+             #{}
+             groups))
+
+          :else
+          (let [groups (group-by
+                        (fn [binding]
+                          (mapv #(substitute % binding) clause))
+                        bindings)
+                card (get cardinality clause)]
+            (if (and card
+                     (<= card (* hash-join-row-budget (count groups))))
+              (hash-join-rows-async groups clause db visible?)
+              (reduce-async
+               (fn [acc [pattern group]]
+                 (-> (scan*-async db pattern visible?)
+                     (.then
+                      (fn [rows]
+                        (into acc
+                              (mapcat
+                               (fn [binding]
+                                 (keep #(unify-positional
+                                         binding clause [(:s %) (:p %) (:o %)])
+                                       rows))
+                               group))))))
+               #{}
+               groups))))))
+
+     (defn- eval-body-variant-async
+       [db visible? body full-map delta-map delta-idx]
+       (reduce-async
+        (fn [bindings [i clause]]
+          (join-clause-async
+           bindings clause db visible?
+           (fn [rname]
+             (if (= i delta-idx)
+               (get delta-map rname #{})
+               (get full-map rname #{})))
+           nil))
+        #{{}}
+        (map-indexed vector body)))
+
+     (defn- rule-seed-async [db visible? parsed-rules]
+       (reduce-async
+        (fn [acc [rname defs]]
+          (-> (reduce-async
+               (fn [tuples {:keys [params body]}]
+                 (-> (eval-body-variant-async db visible? body {} {} -1)
+                     (.then #(into tuples (project-params % params)))))
+               #{}
+               defs)
+              (.then #(assoc acc rname %))))
+        {}
+        parsed-rules))
+
+     (defn- fixpoint-candidates-async
+       [db visible? parsed-rules full delta]
+       (reduce-async
+        (fn [acc [rname defs]]
+          (-> (reduce-async
+               (fn [tuples {:keys [params body]}]
+                 (reduce-async
+                  (fn [derived delta-idx]
+                    (-> (eval-body-variant-async
+                         db visible? body full delta delta-idx)
+                        (.then #(into derived (project-params % params)))))
+                  tuples
+                  (rule-invocation-indices body)))
+               #{}
+               defs)
+              (.then #(assoc acc rname %))))
+        {}
+        parsed-rules))
+
+     (defn- fixpoint-async [db visible? parsed-rules]
+       (-> (rule-seed-async db visible? parsed-rules)
+           (.then
+            (fn [seed]
+              (letfn [(step [full delta iterations]
+                        (cond
+                          (> iterations max-fixpoint-iterations)
+                          (js/Promise.reject
+                           (ex-info
+                            "datalog.core: async fixpoint did not converge within the iteration cap"
+                            {:iterations iterations}))
+
+                          (every? empty? (vals delta))
+                          (js/Promise.resolve full)
+
+                          :else
+                          (-> (fixpoint-candidates-async
+                               db visible? parsed-rules full delta)
+                              (.then
+                               (fn [candidates]
+                                 (let [new-delta
+                                       (into {}
+                                             (map (fn [[rname _]]
+                                                    [rname
+                                                     (set/difference
+                                                      (get candidates rname #{})
+                                                      (get full rname #{}))]))
+                                             parsed-rules)
+                                       full' (merge-with set/union full new-delta)]
+                                   (step full' new-delta (inc iterations))))))))]
+                (step seed seed 0))))))
+
+     (defn q-async
+       "Worker-native Promise counterpart to `q`.
+
+       Query semantics are identical to `q`, including joins, safe negation,
+       disjunction, recursive rules, aggregates, range fusion, ordering, and
+       limits. An `IAsyncPatternSource` is awaited at every scan boundary;
+       no Promise is hidden in the synchronous protocol and no database is
+       materialized as a fallback. A synchronous db is accepted and lifted
+       into a resolved Promise for parity tests and gradual adoption."
+       ([db query visible?] (q-async db query visible? []))
+       ([db {:keys [find where rules in order-by limit clause-cardinality]}
+         visible? inputs]
+        (try
+          (let [in-syms (vec (remove #{'$} (or in [])))
+                initial-binding (into {} (map vector in-syms inputs))
+                parsed-rules (parse-rules (or rules []))
+                all-clauses (flatten-clauses
+                             (into where (mapcat :body)
+                                   (mapcat val parsed-rules)))]
+            (check-clause-safety! where (set in-syms))
+            (doseq [[_ defs] parsed-rules]
+              (doseq [{:keys [body]} defs]
+                (check-clause-safety! body)))
+            (check-unknown-rules! all-clauses parsed-rules)
+            (let [where (fuse-value-ranges where)
+                  prune? (not (some agg-find? find))]
+              (-> (fixpoint-async db visible? parsed-rules)
+                  (.then
+                   (fn [full]
+                     (reduce-async
+                      (fn [bindings [i clause]]
+                        (-> (join-clause-async
+                             bindings clause db visible?
+                             #(get full % #{}) clause-cardinality)
+                            (.then
+                             (fn [bs]
+                               (if prune?
+                                 (prune-bindings
+                                  bs
+                                  (into (form-lvars find)
+                                        (form-lvars
+                                         (subvec (vec where) (inc i)))))
+                                 bs)))))
+                      #{initial-binding}
+                      (map-indexed vector where))))
+                  (.then #(order+limit (project % find)
+                                       find order-by limit)))))
+          (catch :default e
+            (js/Promise.reject e)))))))
