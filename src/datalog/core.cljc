@@ -112,7 +112,6 @@
   the order written, and `:clause-cardinality` is a hint a caller's own
   planner supplies, not one this library computes."
   (:require [datalog.query :as query]
-            [datalog.index :as index]
             [datom.source :as ds]
             [clojure.string :as str]
             [clojure.set :as set]))
@@ -250,47 +249,16 @@
 
 (defn- clause-lvars [pattern] (into #{} (filter lvar?) pattern))
 
-(defn- cmp< [a b] (neg? (compare a b)))
-(defn- cmp> [a b] (pos? (compare a b)))
-(defn- cmp<= [a b] (not (pos? (compare a b))))
-(defn- cmp>= [a b] (not (neg? (compare a b))))
-
-(defn- db-arg? [x] (= '$ x))
-
-(defn- norm-collection-key [x]
-  (cond
-    (keyword? x) (if-let [ns* (namespace x)]
-                   (str ns* "/" (name x))
-                   (name x))
-    :else x))
-
-(defn- ds-contains? [coll item]
-  (let [item' (norm-collection-key item)]
-    (if (set? coll)
-      (boolean (some #(= item' (norm-collection-key %)) coll))
-      (contains? coll item))))
-
-(defn- ds-get-else [db e a default]
-  (let [a' (norm-collection-key a)
-        os (get (index/entity-attrs db e) a')]
-    (if (seq os)
-      (first os)
-      default)))
-
-(defn- ds-missing? [db e a]
-  (let [a' (norm-collection-key a)]
-    (not (contains? (index/entity-attrs db e) a'))))
-
 (def ^:private query-fns
   "The WHITELISTED function registry predicate/function `:where` clauses
   may call (`[(fn-sym arg...)]` / `[(fn-sym arg...) result-var]`) --
   deliberately a fixed whitelist, not arbitrary code execution: a query is
   caller-supplied data in this codebase's threat model, same reasoning as
   `visible?`/rule invocations being data too, never `eval`'d source."
-  {'<              cmp<
-   '>              cmp>
-   '<=             cmp<=
-   '>=             cmp>=
+  {'<              <
+   '>              >
+   '<=             <=
+   '>=             >=
    '=              =
    'not=           not=
    '+              +
@@ -307,11 +275,9 @@
    'starts-with?   str/starts-with?
    'ends-with?     str/ends-with?
    'includes?      str/includes?
+   'string<?       (fn [a b] (neg? (compare (str a) (str b))))
    'lower-case     str/lower-case
-   'upper-case     str/upper-case
-   'contains?      ds-contains?
-   'get-else       ds-get-else
-   'missing?       ds-missing?})
+   'upper-case     str/upper-case})
 
 (defn- predicate-clause?
   "`[(fn-sym arg...)]` or `[(fn-sym arg...) result-var]` -- a `:where`
@@ -416,16 +382,13 @@
                    :else c)))
               where)))))
 
-(defn- eval-fn-arg [db binding x]
-  (if (db-arg? x) db (substitute x binding)))
-
-(defn- eval-fn-call [db binding fn-call]
+(defn- eval-fn-call [binding fn-call]
   (let [fsym (fn-call-sym fn-call)
         f (get query-fns fsym)]
     (when-not f
       (throw (ex-info "datalog.core: unknown or disallowed function in query clause -- see query-fns for the whitelist"
                       {:fn fsym})))
-    (apply f (map #(eval-fn-arg db binding %) (fn-call-args fn-call)))))
+    (apply f (map #(substitute % binding) (fn-call-args fn-call)))))
 
 (defn- and-clause?
   "A multi-clause branch inside `or`/`or-join`, written the way Datomic writes
@@ -638,9 +601,9 @@
       (if result-binding
         (into #{}
               (keep (fn [binding]
-                      (unify-positional binding [result-binding] [(eval-fn-call db binding fn-call)])))
+                      (unify-positional binding [result-binding] [(eval-fn-call binding fn-call)])))
               bindings)
-        (into #{} (filter (fn [binding] (eval-fn-call db binding fn-call))) bindings)))
+        (into #{} (filter (fn [binding] (eval-fn-call binding fn-call))) bindings)))
 
     (or-clause? clause)
     (into #{} (mapcat (fn [branch] (join-branch bindings branch db visible? extension-for cardinality)))
@@ -1476,9 +1439,9 @@
                      (keep (fn [binding]
                              (unify-positional
                               binding [result-binding]
-                              [(eval-fn-call db binding fn-call)])))
+                              [(eval-fn-call binding fn-call)])))
                      bindings)
-               (into #{} (filter #(eval-fn-call db binding fn-call)) bindings))))
+               (into #{} (filter #(eval-fn-call % fn-call)) bindings))))
 
           (or-clause? clause)
           (reduce-async
