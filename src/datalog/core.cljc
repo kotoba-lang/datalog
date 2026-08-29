@@ -249,16 +249,21 @@
 
 (defn- clause-lvars [pattern] (into #{} (filter lvar?) pattern))
 
+(defn- cmp< [a b] (neg? (compare a b)))
+(defn- cmp> [a b] (pos? (compare a b)))
+(defn- cmp<= [a b] (not (pos? (compare a b))))
+(defn- cmp>= [a b] (not (neg? (compare a b))))
+
 (def ^:private query-fns
   "The WHITELISTED function registry predicate/function `:where` clauses
   may call (`[(fn-sym arg...)]` / `[(fn-sym arg...) result-var]`) --
   deliberately a fixed whitelist, not arbitrary code execution: a query is
   caller-supplied data in this codebase's threat model, same reasoning as
   `visible?`/rule invocations being data too, never `eval`'d source."
-  {'<              <
-   '>              >
-   '<=             <=
-   '>=             >=
+  {'<              cmp<
+   '>              cmp>
+   '<=             cmp<=
+   '>=             cmp>=
    '=              =
    'not=           not=
    '+              +
