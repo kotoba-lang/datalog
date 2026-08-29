@@ -453,3 +453,36 @@
                               [(< ?a 20)]]}
                  everything)
            (into #{} (map (fn [i] [(str "p" i)])) (range 18 20))))))
+
+(deftest datascript-shaped-db-fns
+  (let [db (-> (index/empty-db)
+               (assert-quad {:s "r1" :p "law.rel/evidence" :o "cite-1"})
+               (assert-quad {:s "e1" :p "law.rel/kind" :o "law.rel/amends"}))]
+    (testing "get-else returns attribute value or default"
+      (is (= "cite-1"
+             (ffirst (dl/q db {:find '[?v]
+                               :where '[[?r "law.rel/evidence" ?v]]}
+                        everything))))
+      (is (= ""
+             (ffirst (dl/q db {:find '[?v]
+                               :where '[[?r "law.rel/kind" _]
+                                        [(get-else $ ?r "law.rel/evidence" "") ?v]]}
+                        everything)))))
+    (testing "missing? detects absent attributes"
+      (is (= #{["e1"]}
+             (dl/q db {:find '[?e]
+                       :where '[[?e "law.rel/kind" _]
+                                [(missing? $ ?e "law.text/sha256")]]}
+                   everything)))
+      (is (empty?
+           (dl/q db {:find '[?e]
+                     :where '[[?e "law.rel/evidence" _]
+                              [(missing? $ ?e "law.rel/evidence")]]}
+                 everything))))
+    (testing "contains? compares keyword set members against string binds"
+      (is (= #{["e1"]}
+             (dl/q db {:find '[?e]
+                       :where '[[?e "law.rel/kind" ?kind]
+                                [(contains? #{:law.rel/amends :law.rel/repeals} ?kind)]]}
+                   everything))))))
+

@@ -112,6 +112,7 @@
   the order written, and `:clause-cardinality` is a hint a caller's own
   planner supplies, not one this library computes."
   (:require [datalog.query :as query]
+            [datalog.index :as index]
             [datom.source :as ds]
             [clojure.string :as str]
             [clojure.set :as set]))
@@ -254,6 +255,32 @@
 (defn- cmp<= [a b] (not (pos? (compare a b))))
 (defn- cmp>= [a b] (not (neg? (compare a b))))
 
+(defn- db-arg? [x] (= '$ x))
+
+(defn- norm-collection-key [x]
+  (cond
+    (keyword? x) (if-let [ns* (namespace x)]
+                   (str ns* "/" (name x))
+                   (name x))
+    :else x))
+
+(defn- ds-contains? [coll item]
+  (let [item' (norm-collection-key item)]
+    (if (set? coll)
+      (boolean (some #(= item' (norm-collection-key %)) coll))
+      (contains? coll item))))
+
+(defn- ds-get-else [db e a default]
+  (let [a' (norm-collection-key a)
+        os (get (index/entity-attrs db e) a')]
+    (if (seq os)
+      (first os)
+      default)))
+
+(defn- ds-missing? [db e a]
+  (let [a' (norm-collection-key a)]
+    (not (contains? (index/entity-attrs db e) a'))))
+
 (def ^:private query-fns
   "The WHITELISTED function registry predicate/function `:where` clauses
   may call (`[(fn-sym arg...)]` / `[(fn-sym arg...) result-var]`) --
@@ -281,7 +308,10 @@
    'ends-with?     str/ends-with?
    'includes?      str/includes?
    'lower-case     str/lower-case
-   'upper-case     str/upper-case})
+   'upper-case     str/upper-case
+   'contains?      ds-contains?
+   'get-else       ds-get-else
+   'missing?       ds-missing?})
 
 (defn- predicate-clause?
   "`[(fn-sym arg...)]` or `[(fn-sym arg...) result-var]` -- a `:where`
@@ -386,13 +416,16 @@
                    :else c)))
               where)))))
 
-(defn- eval-fn-call [binding fn-call]
+(defn- eval-fn-arg [db binding x]
+  (if (db-arg? x) db (substitute x binding)))
+
+(defn- eval-fn-call [db binding fn-call]
   (let [fsym (fn-call-sym fn-call)
         f (get query-fns fsym)]
     (when-not f
       (throw (ex-info "datalog.core: unknown or disallowed function in query clause -- see query-fns for the whitelist"
                       {:fn fsym})))
-    (apply f (map #(substitute % binding) (fn-call-args fn-call)))))
+    (apply f (map #(eval-fn-arg db binding %) (fn-call-args fn-call)))))
 
 (defn- and-clause?
   "A multi-clause branch inside `or`/`or-join`, written the way Datomic writes
@@ -605,9 +638,9 @@
       (if result-binding
         (into #{}
               (keep (fn [binding]
-                      (unify-positional binding [result-binding] [(eval-fn-call binding fn-call)])))
+                      (unify-positional binding [result-binding] [(eval-fn-call db binding fn-call)])))
               bindings)
-        (into #{} (filter (fn [binding] (eval-fn-call binding fn-call))) bindings)))
+        (into #{} (filter (fn [binding] (eval-fn-call db binding fn-call))) bindings)))
 
     (or-clause? clause)
     (into #{} (mapcat (fn [branch] (join-branch bindings branch db visible? extension-for cardinality)))
@@ -1443,9 +1476,9 @@
                      (keep (fn [binding]
                              (unify-positional
                               binding [result-binding]
-                              [(eval-fn-call binding fn-call)])))
+                              [(eval-fn-call db binding fn-call)])))
                      bindings)
-               (into #{} (filter #(eval-fn-call % fn-call)) bindings))))
+               (into #{} (filter #(eval-fn-call db binding fn-call)) bindings))))
 
           (or-clause? clause)
           (reduce-async
