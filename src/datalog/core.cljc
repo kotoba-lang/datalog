@@ -1479,7 +1479,17 @@
                               binding [result-binding]
                               [(eval-fn-call db binding fn-call)])))
                      bindings)
-               (into #{} (filter #(eval-fn-call db binding fn-call)) bindings))))
+               ;; `(fn [binding] …)`, not `#(… binding …)`: the anonymous-fn
+               ;; reader gives its argument the name `%`, so `binding` here was
+               ;; free and resolved to the `clojure.core/binding` MACRO. This
+               ;; whole block is inside `#?(:cljs …)`, so the JVM never compiled
+               ;; it and the synchronous twin at the top of this file -- which
+               ;; spells it `(fn [binding] …)` and is correct -- kept the tests
+               ;; green. Measured 2026-09-05: nbb refuses to load this namespace
+               ;; at all (`Can't take value of a macro`), which is why nothing
+               ;; that depends on it had a portable test.
+               (into #{} (filter (fn [binding] (eval-fn-call db binding fn-call)))
+                     bindings))))
 
           (or-clause? clause)
           (reduce-async
