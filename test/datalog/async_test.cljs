@@ -53,7 +53,23 @@
                              [(< ?score 35)]]}
                    {:find '[?person]
                     :where '[(or [?person "active" true]
-                                 [?person "score" 20])]}]]
+                                 [?person "score" 20])]}
+                   ;; A predicate clause with NO result binding, over two
+                   ;; variables. The `[(>= ?score 15)]` case above never reaches
+                   ;; the generic predicate path -- a range comparison against a
+                   ;; literal is fused into the scan -- so until this query
+                   ;; existed, `q-async` had a branch no test entered. That
+                   ;; branch spelled its filter `#(eval-fn-call db binding …)`,
+                   ;; where `binding` is free and resolves to the
+                   ;; `clojure.core/binding` MACRO; the synchronous twin spells
+                   ;; it `(fn [binding] …)` and is correct. shadow-cljs compiles
+                   ;; the broken form with a warning rather than an error, and
+                   ;; nbb refuses to load the namespace at all, which is how it
+                   ;; survived (2026-09-05, ADR-2609051700).
+                   {:find '[?p ?q]
+                    :where '[[?p "score" ?ps]
+                             [?q "score" ?qs]
+                             [(not= ?p ?q)]]}]]
       (-> (js/Promise.all
            (into-array (map #(d/q-async src % everything) queries)))
           (.then (fn [actuals]
