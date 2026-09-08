@@ -5,7 +5,7 @@
 ;; never a hand-duplicated, driftable path list.
 ;;
 ;; nbb, not bb: this workspace's script host is nbb (ADR-2607173000).
-(require '[clojure.string :as str])
+(require '[kotoba.lang.text :as str])
 (def fs (js/require "node:fs"))
 (def cp (js/require "node:child_process"))
 (defn sh [& args]
