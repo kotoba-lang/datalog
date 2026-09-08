@@ -114,7 +114,7 @@
   (:require [datalog.query :as query]
             [datalog.index :as index]
             [datom.source :as ds]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.set :as set]))
 
 (def ^:dynamic ^:private *pattern-source?*
@@ -308,8 +308,8 @@
    'ends-with?     str/ends-with?
    'includes?      str/includes?
    'string<?       (fn [a b] (neg? (compare (str a) (str b))))
-   'lower-case     str/lower-case
-   'upper-case     str/upper-case
+   'lower-case     str/lower
+   'upper-case     str/upper
    'contains?      ds-contains?
    'get-else       ds-get-else
    'missing?       ds-missing?})

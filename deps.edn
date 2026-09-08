@@ -1,6 +1,11 @@
 {:paths ["src"]
  ;; The ONE runtime dependency, and it is a protocol + combinators with
- ;; `:deps {}` of its own -- so this library's whole transitive runtime
+ ;; `:deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       }` of its own -- so this library's whole transitive runtime
  ;; closure is `datom.source`. Deliberately absent: io-ipld, io-multiformats,
  ;; prolly-tree, block-cache. Nothing here stores, hashes, or addresses
  ;; anything. Pinned to the same SHA `kotoba-lang/arrangement`'s main uses.

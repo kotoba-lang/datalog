@@ -5,7 +5,7 @@
   deliberately NOT ported: they test the IPLD default this extraction
   removed, and they belong to the persistence half that stayed behind."
   (:require [clojure.test :refer [deftest is testing]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [datalog.index :as index]))
 
 (def ^:private no-refs
