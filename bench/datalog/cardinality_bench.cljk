@@ -2,7 +2,7 @@
   "Reproducible planner-cost microbenchmark: exact visible cardinality versus
   the covering-index upper bound used by query planning.
 
-  Usage: clojure -M:cardinality-bench [rows] [samples]"
+  Usage: kbb -M:cardinality-bench [rows] [samples]"
   (:require [datalog.index :as index]
             [datalog.query :as query]))
 
