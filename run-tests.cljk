@@ -21,7 +21,8 @@
             [datalog.order-limit-test]
             [datalog.projection-test]
             [datalog.query-cardinality-test]
-            [datalog.query-test]))
+            [datalog.query-test]
+            [datalog.singleton-test]))
 
 (defmethod t/report [::t/default :end-run-tests] [m]
   (when-not (t/successful? m)

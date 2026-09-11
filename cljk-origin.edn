@@ -9,6 +9,7 @@
   "src/datalog/core.cljk" ".cljc"
   "src/datalog/index.cljk" ".cljc"
   "src/datalog/query.cljk" ".cljc"
+  "src/datalog/singleton.cljk" ".cljc"
   "test/datalog/async_test.cljk" ".cljs"
   "test/datalog/canonicalize_test.cljk" ".cljc"
   "test/datalog/core_test.cljk" ".cljc"
@@ -18,4 +19,5 @@
   "test/datalog/order_limit_test.cljk" ".cljc"
   "test/datalog/projection_test.cljk" ".cljc"
   "test/datalog/query_cardinality_test.cljk" ".cljc"
+  "test/datalog/singleton_test.cljk" ".cljc"
   "test/datalog/query_test.cljk" ".cljc"}}

@@ -55,7 +55,8 @@
 
   Pass `(constantly false)` if you do not use reverse-reference lookup;
   `refs-to` then always returns `{}` and `:vaet` stays empty."
-  (:require [datom.source :as ds]))
+  (:require [datom.source :as ds]
+            [datalog.singleton :as singleton]))
 
 (defn empty-db
   "A db with all four indices empty. Just a map -- nothing to close, nothing
@@ -91,8 +92,15 @@
                      :expected [:eavt :aevt :avet :vaet]})))
   db)
 
+;; A counterpart set that holds one value is `singleton/of` (one object), not
+;; `#{v}` (about 160 bytes on the JVM): 99.5% of them hold one value, and this
+;; is where a full LDBC SF1 stopped fitting a 16 GiB host (ADR-2609121100).
+;; `conj` on it returns an ordinary set, so nothing below this line changes.
+(defn- conj-counterpart [s v]
+  (if (nil? s) (singleton/of v) (conj s v)))
+
 (defn- upd [m k1 k2 v]
-  (update m k1 (fnil (fn [m2] (update m2 k2 (fnil conj #{}) v)) {})))
+  (update m k1 (fnil (fn [m2] (update m2 k2 conj-counterpart v)) {})))
 
 (defn- rm [m k1 k2 v]
   (if-let [m2 (get m k1)]
@@ -203,9 +211,9 @@
     ;; entries and becomes a hash-map. Discarding the return value therefore
     ;; silently truncates every inner map at exactly eight entries -- which is
     ;; what the first version of this did, and what the equivalence test caught.
-    (let [inner' (assoc! inner k2 (conj (get inner k2 #{}) v))]
+    (let [inner' (assoc! inner k2 (conj-counterpart (get inner k2) v))]
       (if (identical? inner' inner) m (assoc m k1 inner')))
-    (assoc m k1 (assoc! (transient {}) k2 #{v}))))
+    (assoc m k1 (assoc! (transient {}) k2 (singleton/of v)))))
 
 (defn mutable-db
   "A mutable bulk-loading accumulator over `db`. Pair with `assert-quads!` and
