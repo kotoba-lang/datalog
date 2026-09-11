@@ -1331,9 +1331,24 @@
                :dependent (vec dependent)
                :independent (vec independent)})))))))
 
+(def ^:private ordered-drive-value-budget
+  "How many distinct values the drive walks before giving up and handing the
+  query to the plain join. The drive pays per value walked and wins when hits
+  are dense (a large friend-of-friend set, or an empty range); when hits are
+  sparse it walks thousands of values to fill a small limit. Measured
+  2026-09-11 (ayatori iteration 19, LDBC SF1 subset, official parameters):
+  IC09 163 -> 2.7 ms, but an unbounded drive took IC02's non-empty answers
+  from 1.1 to 17.1 ms -- 30 friends' messages are 0.3% of 86,932 dates, so
+  20 hits cost ~6,000 values. 512 values is under a millisecond of walking;
+  a query that has not filled its limit by then is one the plain join
+  answers cheaply."
+  512)
+
 (defn- ordered-drive
   "Answer `q` for the shape `ordered-drive-plan` accepted. Returns the
-  ordered, limited VECTOR `order+limit` would have returned."
+  ordered, limited VECTOR `order+limit` would have returned, or
+  `::exhausted-budget` when the walk passed `ordered-drive-value-budget`
+  values without filling the limit -- the caller then runs the plain join."
   [db {:keys [e a v dir lo hi lo-open? hi-open? dependent independent]}
    find order-by limit visible? clause-cardinality initial-binding]
   (let [find-vars (form-lvars find)
@@ -1372,10 +1387,11 @@
                                                           (chain start))))
                                         starts)]
                        (vec (sort #(compare-rows spec %1 %2) (project joined find)))))]
-    (loop [walk walk acc []]
-      (if (or (nil? walk) (>= (count acc) limit))
-        (vec (take limit acc))
-        (recur (next walk) (into acc (group-rows (first walk))))))))
+    (loop [walk walk acc [] walked 0]
+      (cond
+        (or (nil? walk) (>= (count acc) limit)) (vec (take limit acc))
+        (>= walked ordered-drive-value-budget) ::exhausted-budget
+        :else (recur (next walk) (into acc (group-rows (first walk))) (inc walked))))))
 
 (defn q
   "`{:find [?var ...] :in [?param ...] :where [[e a v] ...] :rules [...]}`
@@ -1446,8 +1462,10 @@
            drive (when (and *ordered-drive*
                             (not (if (some? *pattern-source?*) *pattern-source?* false)))
                    (ordered-drive-plan where find order-by limit parsed-rules initial-binding))]
-      (if drive
-        (ordered-drive db drive find order-by limit visible? clause-cardinality initial-binding)
+      (let [driven (when drive
+                     (ordered-drive db drive find order-by limit visible? clause-cardinality initial-binding))]
+       (if (and driven (not= driven ::exhausted-budget))
+        driven
         (let [full (fixpoint db visible? parsed-rules)
            ;; With an aggregate in :find, binding MULTIPLICITY is observable --
            ;; `project` computes each aggregate over the bindings in its group,
@@ -1465,7 +1483,7 @@
                                   bs)))
                             #{initial-binding}
                             (map-indexed vector where))]
-       (order+limit (project bindings find) find order-by limit))))))))
+       (order+limit (project bindings find) find order-by limit)))))))))
 
 #?(:cljs
    (do
