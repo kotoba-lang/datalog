@@ -421,7 +421,7 @@
 
 (defn- composite-clause? [x] (and (map? x) (contains? x :composite/e)))
 
-(declare group-cut form-lvars)
+(declare group-cut form-lvars agg-find? agg-var)
 
 (defn- fuse-composites
   "Rewrite two ADJACENT clauses on the same fresh entity into one lookup
@@ -440,10 +440,23 @@
   ~300 keyed lookups each per person before this; the group order answers
   both in O(log n + hits). Bound-ness is tracked in clause order from the
   inputs, so a fusion never reads a variable no earlier clause bound."
-  [where initial-binding]
+  ([where initial-binding] (fuse-composites where initial-binding nil))
+  ([where initial-binding find]
   (let [where (vec where)
         triple? (fn [c] (and (vector? c) (not (predicate-clause? c)) (= 3 (count c))))
-        ground-attr? (fn [a] (and (not (lvar? a)) (not (wildcard? a))))]
+        ground-attr? (fn [a] (and (not (lvar? a)) (not (wildcard? a))))
+        ;; COUNT PUSHDOWN: when `:find` wants exactly `(count ?e)` of the entity a
+        ;; LAST-clause composite binds, and ?e appears in no other clause and
+        ;; nowhere else in :find, the lookup can answer with one binding per
+        ;; input weighted by its number of entries instead of one per entry.
+        ;; LDBC IC05 (iteration 47): ~200k (forum, post) bindings materialized
+        ;; for 20 rows of counts.
+        count-var (when (and find (= 1 (count (filter agg-find? find))))
+                    (let [a (first (filter agg-find? find))]
+                      (when (and (= 'count (first a)) (lvar? (agg-var a))
+                                 (not (some #{(agg-var a)} (remove agg-find? find))))
+                        (agg-var a))))
+        occurrences (fn [v] (count (filter #(contains? (form-lvars %) v) where)))]
     (loop [i 0 bound (set (keys initial-binding)) out []]
       (if (>= i (count where))
         out
@@ -464,8 +477,16 @@
                        :composite/range? true}
                       :else nil))))]
           (if fused
-            (recur (+ i 2) (into bound (form-lvars fused)) (conj out fused))
-            (recur (inc i) (into bound (form-lvars c)) (conj out c))))))))
+            (let [last? (= (+ i 2) (count where))
+                  ;; the entity var must be the composite's own and appear in these two clauses only
+                  fused (if (and last? count-var (= count-var (:composite/e fused))
+                               (= 2 (occurrences count-var))
+                               (not (:composite/range? fused))
+                               (or (not (lvar? (:composite/v fused))) (contains? bound (:composite/v fused))))
+                          (assoc fused :composite/count-into count-var)
+                          fused)]
+              (recur (+ i 2) (into bound (form-lvars fused)) (conj out fused)))
+            (recur (inc i) (into bound (form-lvars c)) (conj out c)))))))))
 
 (defn- eval-fn-arg [db binding x]
   (if (db-arg? x) db (substitute x binding)))
@@ -716,6 +737,7 @@
     (let [{e :composite/e g :composite/g gv-term :composite/gv a :composite/a v :composite/v
            lo :composite/lo hi :composite/hi lo-open? :composite/lo-open? hi-open? :composite/hi-open? range? :composite/range?} clause
           groups (index/grouped-values db g a)
+          count-into (:composite/count-into clause)
           term-val (fn [b t] (if (lvar? t) (get b t) t))]
       (into #{}
             (mapcat (fn [b]
@@ -727,13 +749,17 @@
                                           (let [x (term-val b v)]
                                             (subseq ss >= [x :datalog.index/lo] <= [x :datalog.index/hi]))
                                           :else (seq ss))]
-                            (keep (fn [[val ent]]
-                                    (when (and (visible? {:s ent :p g :o gv}) (visible? {:s ent :p a :o val}))
-                                      (let [b (assoc b e ent)]
-                                        (if (lvar? v)
-                                          (if (contains? b v) (when (= (get b v) val) b) (assoc b v val))
-                                          b))))
-                                  entries)))))
+                            (if count-into
+                              ;; one binding, weighted by the visible entries (none -> no binding)
+                              (let [n (count (filter (fn [[val ent]] (and (visible? {:s ent :p g :o gv}) (visible? {:s ent :p a :o val}))) entries))]
+                                (when (pos? n) [(assoc b ::weight n)]))
+                              (keep (fn [[val ent]]
+                                      (when (and (visible? {:s ent :p g :o gv}) (visible? {:s ent :p a :o val}))
+                                        (let [b (assoc b e ent)]
+                                          (if (lvar? v)
+                                            (if (contains? b v) (when (= (get b v) val) b) (assoc b v val))
+                                            b))))
+                                    entries))))))
             bindings)))
 
     (not-clause? clause)
@@ -1044,9 +1070,18 @@
     (let [group-vars (into [] (remove agg-find?) find)
           row (fn [group-bindings]
                 (mapv (fn [f]
-                        (if (agg-find? f)
+                        (cond
+                          ;; a binding may carry a WEIGHT: a composite lookup that
+                          ;; was asked only for `(count ?e)` folds its entries into
+                          ;; one binding weighted by their number (iteration 47);
+                          ;; `count` sums weights, every other aggregate sees the
+                          ;; bindings as they are (weights are only attached when
+                          ;; count is the only aggregate over that variable)
+                          (and (agg-find? f) (= 'count (first f)))
+                          (reduce + 0 (map #(if (contains? % ::weight) (::weight %) (if (contains? % (agg-var f)) 1 0)) group-bindings))
+                          (agg-find? f)
                           ((agg-fn f) (mapv #(get % (agg-var f)) group-bindings))
-                          (get (first group-bindings) f)))
+                          :else (get (first group-bindings) f)))
                       find))]
       (if (empty? group-vars)
         #{(row bindings)}
@@ -1719,7 +1754,7 @@
               ;; and the db is materialized (the group order is an index of it)
               where (if (or drive (if (some? *pattern-source?*) *pattern-source?* false))
                       where
-                      (fuse-composites where initial-binding))
+                      (fuse-composites where initial-binding find))
               full (fixpoint db visible? parsed-rules)
            ;; With an aggregate in :find, binding MULTIPLICITY is observable --
            ;; `project` computes each aggregate over the bindings in its group,
