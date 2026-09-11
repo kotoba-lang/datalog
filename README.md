@@ -431,7 +431,7 @@ npm install && npm run test:cljs
 
 Both jobs run in CI on every push and PR. The ClojureScript job is a real
 ClojureScript compile-and-run, not a `.cljc` file merely *named* portable:
-`gen-shadow-cljs-edn.cljs` resolves `clojure -Spath` into
+`gen-shadow-cljs-edn.cljk` resolves `clojure -Spath` into
 `shadow-cljs.edn`'s `:source-paths`, so cljs compiles against the same
 pinned dependency SHAs the JVM job uses, and portability is machine-verified
 rather than asserted.
