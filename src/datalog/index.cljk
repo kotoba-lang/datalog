@@ -103,16 +103,71 @@
         (assoc m k1 (assoc m2 k2 s))))
     m))
 
+;; ── value order: the sorted values of an attribute, maintained on write ──────
+;;
+;; The ordered drive (datalog.core) walks an attribute's distinct values in
+;; order. That order is a projection of `:avet`'s keys, held here per
+;; attribute as a persistent sorted-set, keyed by IDENTITY of the `:avet`
+;; inner map it describes: a hit is exact, and a write that goes through
+;; `assert-quad` / `retract-quad` carries the tracked entry forward with one
+;; conj/disj (O(log V)) instead of leaving a stale entry for the next read to
+;; rebuild in O(V log V). Measured 2026-09-11 (ayatori iteration 31, LDBC
+;; SNB SF1 subset, 6 of 17 operations inserts): with rebuild-on-miss every
+;; read after a write re-sorted 87k creationDate values -- IC02 3.8 -> 33.8 ms
+;; served, IC09 7.4 -> 34.0, IS2 3.6 -> 30.3, and the mix fell from ~2,000
+;; to 511 ops/s. The bulk transient path (`assert-quads!`) does not track;
+;; its entry goes stale and the next read rebuilds once.
+
+(def ^:private value-order
+  "attr -> {:index <the :avet inner map> :sorted <sorted-set of its keys>}"
+  (atom {}))
+
+(def ^:private value-order-rebuilds
+  "How many times `ordered-values` sorted from scratch -- so a test can tell
+  a maintained entry from a rebuilt one, which return the same set."
+  (atom 0))
+
+(defn ordered-values
+  "The distinct values of `attr` on `db`, as a sorted-set (ascending by
+  `compare`; use `subseq`/`rsubseq` for cuts). Built once per (attr, index
+  version) and carried across `assert-quad`/`retract-quad`."
+  [db attr]
+  (let [inner (get (:avet db) attr)
+        hit (get @value-order attr)]
+    (if (and hit (identical? (:index hit) inner))
+      (:sorted hit)
+      (let [sorted (into (sorted-set) (keys inner))]
+        (swap! value-order-rebuilds inc)
+        (swap! value-order assoc attr {:index inner :sorted sorted})
+        sorted))))
+
+(defn value-order-rebuild-count [] @value-order-rebuilds)
+
+(defn- carry-value-order!
+  "After a write moved `:avet`'s inner map for `p` from `before` to `after`:
+  if the tracked entry described `before`, make it describe `after` with the
+  value conj'd (assert) or disj'd (retract, when no subject holds it any more)."
+  [before after p o op]
+  (when-let [hit (get @value-order p)]
+    (when (identical? (:index hit) before)
+      (let [sorted (case op
+                     :assert (conj (:sorted hit) o)
+                     :retract (if (contains? after o) (:sorted hit) (disj (:sorted hit) o)))]
+        (swap! value-order assoc p {:index after :sorted sorted})))))
+
 (defn assert-quad
   "Add `{:s :p :o}` to `db`'s four indices. `ref?` is REQUIRED (see the ns
   docstring): it decides whether `:o` is additionally indexed in `:vaet` for
   reverse-reference lookup via `refs-to`. Pure -- returns a new db."
   [db {:keys [s p o]} ref?]
-  (cond-> db
-    true     (update :eavt upd s p o)
-    true     (update :aevt upd p s o)
-    true     (update :avet upd p o s)
-    (ref? o) (update :vaet upd o p s)))
+  (let [before (get (:avet db) p)
+        db' (cond-> db
+              true     (update :eavt upd s p o)
+              true     (update :aevt upd p s o)
+              true     (update :avet upd p o s)
+              (ref? o) (update :vaet upd o p s))]
+    (carry-value-order! before (get (:avet db') p) p o :assert)
+    db'))
 
 (defn- ->mutable
   "One index, `{k1 {k2 #{v}}}`, with every inner map made transient. The outer
@@ -201,11 +256,14 @@
   agree with the one used to assert the same quad -- otherwise the `:vaet`
   entry is left behind. Pure -- returns a new db."
   [db {:keys [s p o]} ref?]
-  (cond-> db
-    true     (update :eavt rm s p o)
-    true     (update :aevt rm p s o)
-    true     (update :avet rm p o s)
-    (ref? o) (update :vaet rm o p s)))
+  (let [before (get (:avet db) p)
+        db' (cond-> db
+              true     (update :eavt rm s p o)
+              true     (update :aevt rm p s o)
+              true     (update :avet rm p o s)
+              (ref? o) (update :vaet rm o p s))]
+    (carry-value-order! before (get (:avet db') p) p o :retract)
+    db'))
 
 (defn entity-attrs
   "All `{p #{o...}}` for subject `s`, off `:eavt`."

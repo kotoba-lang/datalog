@@ -2,7 +2,7 @@
   "ADR-2608021000 §6-2: :order-by / :limit, so a top-N query is expressible in
   the query instead of in host code. Every LDBC SNB complex read is a
   'most recent N' query."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [datalog.index :as index]
             [datalog.core :as d]))
 
@@ -160,3 +160,26 @@
       (let [[drive plain] (both-ways db (query max) [p])]
         (is (= plain drive) (str "ic09 with not= " p " " max))
         (is (not-any? (fn [[x _ _]] (= x p)) drive) "the start person is excluded")))))
+
+(deftest the-value-order-is-carried-across-writes-not-rebuilt
+  ;; A write through assert-quad carries the tracked order forward with one
+  ;; conj; a stale entry would be rebuilt (a sort of every value) on the next
+  ;; read. Same answer either way, so the test counts rebuilds.
+  (let [db (social-db)
+        query {:find '[?m ?d] :in '[?p]
+               :where '[[?p "knows" ?x] [?m "hasCreator" ?x] [?m "date" ?d]]
+               :order-by '[[?d :desc] [?m :asc]] :limit 3}
+        _ (d/q db query everything ["p1"])
+        rebuilds-before (index/value-order-rebuild-count)
+        db2 (-> db (index/assert-quad {:s "m99" :p "hasCreator" :o "p2"} no-refs)
+                   (index/assert-quad {:s "m99" :p "date" :o "999"} no-refs))
+        answer (d/q db2 query everything ["p1"])]
+    (is (= "m99" (ffirst answer)) "the new, newest message leads the answer")
+    (is (= rebuilds-before (index/value-order-rebuild-count)) "no rebuild: the order was carried across the two writes")
+    (is (= answer (binding [d/*ordered-drive* false] (d/q db2 query everything ["p1"]))))
+    (testing "a retract carries too, and the value leaves the order when no subject holds it"
+      (let [db3 (index/retract-quad db2 {:s "m99" :p "date" :o "999"} no-refs)
+            a3 (d/q db3 query everything ["p1"])]
+        (is (not= "m99" (ffirst a3)))
+        (is (= rebuilds-before (index/value-order-rebuild-count)))
+        (is (= a3 (binding [d/*ordered-drive* false] (d/q db3 query everything ["p1"]))))))))
