@@ -149,7 +149,9 @@
   [db pattern visible?]
   (if (if (some? *pattern-source?*) *pattern-source?* (satisfies? ds/IPatternSource db))
     (into #{} (filter visible?) (ds/scan db pattern))
-    (query/query db pattern visible?)))
+    ;; a vector, not a set: an index scan yields distinct quads, and every
+    ;; consumer here maps, keeps or seqs over the result (iteration 41)
+    (query/query-vec db pattern visible?)))
 
 (defn- scan-range*
   "Resolve `[lo, hi)` on `attr` against `db`. Prefers `IRangeSource` so a
