@@ -422,8 +422,8 @@ order/limit, projection pruning, cardinality).
 belong to the half that stayed.
 
 ```bash
-clojure -M:test      # JVM: 79 tests, 127 assertions, 0 failures, 0 errors
-clojure -M:lint      # clj-kondo: 0 errors, 0 warnings
+kbb -M:test      # JVM: 79 tests, 127 assertions, 0 failures, 0 errors
+kbb -M:lint      # clj-kondo: 0 errors, 0 warnings
 npm install && npm run test:cljs
                      # ClojureScript (shadow-cljs :node-test):
                      # 79 tests, 127 assertions, 0 failures, 0 errors
@@ -431,7 +431,7 @@ npm install && npm run test:cljs
 
 Both jobs run in CI on every push and PR. The ClojureScript job is a real
 ClojureScript compile-and-run, not a `.cljc` file merely *named* portable:
-`gen-shadow-cljs-edn.cljk` resolves `clojure -Spath` into
+`gen-shadow-cljs-edn.cljk` resolves `kbb -Spath` into
 `shadow-cljs.edn`'s `:source-paths`, so cljs compiles against the same
 pinned dependency SHAs the JVM job uses, and portability is machine-verified
 rather than asserted.
