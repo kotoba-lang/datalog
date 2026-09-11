@@ -1256,40 +1256,20 @@
   join on the same query; never rebound by callers."
   true)
 
-(def ^:private sorted-values-cache
-  "attr -> {:index <the :avet inner map the sort was taken from> :sorted [..]}.
-  One entry per attribute, keyed by IDENTITY of the immutable inner map: a
-  transaction that touches the attribute replaces that map, so the cache
-  misses; one that does not touch it keeps the same object and hits. The sort
-  is O(V log V) once per (attribute, db version) -- the projection this is,
-  rebuilt from the index, never a second source of truth."
-  (atom {}))
-
-(defn- sorted-values
-  "Distinct values of `attr` on a materialized db, ascending by `compare`."
-  [db attr]
-  (let [inner (get (:avet db) attr)
-        hit (get @sorted-values-cache attr)]
-    (if (and hit (identical? (:index hit) inner))
-      (:sorted hit)
-      (let [sorted (vec (sort compare (keys inner)))]
-        (swap! sorted-values-cache assoc attr {:index inner :sorted sorted})
-        sorted))))
-
-(defn- lower-index
-  "First index in ascending `v` whose value is not below `bound` (`open?`
-  false) or strictly above it (`open?` true). nil bound -> 0."
-  [v bound open?]
-  (if (nil? bound)
-    0
-    (loop [lo 0 hi (count v)]
-      (if (>= lo hi)
-        lo
-        (let [mid (quot (+ lo hi) 2)
-              c (compare (nth v mid) bound)]
-          (if (or (neg? c) (and open? (zero? c)))
-            (recur (inc mid) hi)
-            (recur lo mid)))))))
+(defn- ordered-window
+  "The values of `a` between `lo` and `hi` (nil = unbounded; open flags as
+  in the fused range), in `dir` order, off `datalog.index/ordered-values`
+  (a sorted-set): `subseq`/`rsubseq` cuts, no sort per query."
+  [db a lo hi lo-open? hi-open? dir]
+  (let [ss (index/ordered-values db a)
+        lo-test (if lo-open? > >=)
+        hi-test (if hi-open? < <=)
+        sub (if (= dir :desc) rsubseq subseq)]
+    (cond
+      (and (nil? lo) (nil? hi)) (if (= dir :desc) (rseq ss) (seq ss))
+      (nil? hi) (sub ss lo-test lo)
+      (nil? lo) (sub ss hi-test hi)
+      :else (sub ss lo-test lo hi-test hi))))
 
 (defn- ordered-drive-plan
   "The shape the drive answers, or nil.
@@ -1387,11 +1367,7 @@
                                                     (mapcat form-lvars (subvec dependent (inc i)))))))
                         starts
                         (map-indexed vector dependent)))
-        values (sorted-values db a)
-        from (lower-index values lo lo-open?)
-        to (if (nil? hi) (count values) (lower-index values hi (not hi-open?)))
-        window (if (< from to) (subvec values from to) [])
-        walk (if (= dir :desc) (rseq window) (seq window))
+        walk (ordered-window db a lo hi lo-open? hi-open? dir)
         spec (order-spec find order-by)
         ;; Values are walked in CHUNKS: the dependent chain runs once per
         ;; chunk over every driver binding in it, so the per-step machinery
