@@ -674,10 +674,21 @@
           terms [(:range/e clause) (:range/a clause) (:range/v clause)]
           opts {:lo-open? (:range/lo-open? clause)
                 :hi-open? (:range/hi-open? clause)}]
+      ;; When the entity is already BOUND, the range is a question about one
+      ;; entity's values of `a`, not about the attribute's whole value domain:
+      ;; a keyed scan of `[e a _]` and an `in-range?` test. The relation-wide
+      ;; `scan-range*` is right only for an open entity. Measured 2026-09-11
+      ;; (ayatori iteration 18, LDBC SNB IC09 on the SF1 subset): with ?msg
+      ;; bound from the join, one `scan-range*` per DISTINCT message walked all
+      ;; 86,932 creationDate values each time -- the fused range made the query
+      ;; slower than the unfused filter it replaced, which is the opposite of
+      ;; what the fusion is for.
       (into #{}
             (mapcat (fn [[{:keys [a lo hi e]} group]]
-                      (let [rows (cond->> (scan-range* db a lo hi opts visible?)
-                                   (some? e) (filter #(= e (:s %))))]
+                      (let [rows (if (some? e)
+                                   (filter #(ds/in-range? (:o %) lo hi opts)
+                                           (scan* db [e a nil] visible?))
+                                   (scan-range* db a lo hi opts visible?))]
                         (mapcat (fn [binding]
                                   (keep #(unify-positional binding terms
                                                            [(:s %) (:p %) (:o %)])
@@ -1537,11 +1548,15 @@
                       :hi-open? (:range/hi-open? clause)}]
             (-> (map-bounded-async
                  (fn [[{:keys [a lo hi e]} group]]
-                   (-> (scan-range*-async db a lo hi opts visible?)
+                   ;; same shape as the sync branch: a bound entity is a keyed
+                   ;; scan plus in-range?, never a walk of the value domain
+                   (-> (if (some? e)
+                         (.then (scan*-async db [e a nil] visible?)
+                                (fn [rows] (filter #(ds/in-range? (:o %) lo hi opts) rows)))
+                         (scan-range*-async db a lo hi opts visible?))
                        (.then
-                        (fn [scanned]
-                          (let [rows (cond->> scanned
-                                       (some? e) (filter #(= e (:s %))))]
+                        (fn [rows]
+                          (let [rows (vec rows)]
                             (into #{}
                                   (mapcat
                                    (fn [binding]

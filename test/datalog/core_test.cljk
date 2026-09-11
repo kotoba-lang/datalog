@@ -1,7 +1,8 @@
 (ns datalog.core-test
   (:require [clojure.test :refer [deftest is testing]]
             [datalog.index :as index]
-            [datalog.core :as dl]))
+            [datalog.core :as dl]
+            [datom.source :as ds]))
 
 (defn- assert-quad
   "`datalog.index/assert-quad` with an explicit `ref?` -- these fixtures use
@@ -453,6 +454,41 @@
                               [(< ?a 20)]]}
                  everything)
            (into #{} (map (fn [i] [(str "p" i)])) (range 18 20))))))
+
+(deftest a-range-on-a-bound-entity-is-a-keyed-scan-not-a-domain-walk
+  ;; With ?e already bound by an earlier clause, the fused range is a question
+  ;; about ONE entity's values: it must go through `scan` on `[e a _]`, never
+  ;; through `scan-range` over the attribute's whole value domain (one walk
+  ;; per distinct entity -- measured at 86,932 values per message on LDBC
+  ;; IC09, ayatori iteration 18). With ?e open, one `scan-range` is right.
+  (let [quads (into #{} (for [i (range 20)] {:s (str "p" i) :p "age" :o i}))
+        quads (into quads (for [i (range 20)] {:s "g" :p "member" :o (str "p" i)}))
+        scans (atom []) ranges (atom [])
+        src (reify
+              ds/IPatternSource
+              (-scan [_ [s p o]]
+                (swap! scans conj [s p o])
+                (filter (fn [q] (and (or (nil? s) (= s (:s q)))
+                                     (or (nil? p) (= p (:p q)))
+                                     (or (nil? o) (= o (:o q)))))
+                        quads))
+              ds/IRangeSource
+              (-scan-range [_ attr lo hi opts]
+                (swap! ranges conj [attr lo hi])
+                (filter (fn [q] (and (= attr (:p q)) (ds/in-range? (:o q) lo hi opts))) quads)))
+        bound-first '{:find [?m] :where [["g" "member" ?m] [?m "age" ?a] [(>= ?a 18)] [(< ?a 20)]]}
+        open-first  '{:find [?m] :where [[?m "age" ?a] [(>= ?a 18)] [(< ?a 20)] ["g" "member" ?m]]}]
+    (testing "entity bound by the earlier clause: keyed scans, no domain walk"
+      (reset! scans []) (reset! ranges [])
+      (is (= #{["p18"] ["p19"]} (dl/q src bound-first everything)))
+      (is (= 0 (count @ranges)))
+      (is (= 20 (count (filter (fn [[s p _]] (and (some? s) (= p "age"))) @scans)))
+          "one keyed [e age _] scan per distinct bound entity"))
+    (testing "entity open: exactly one range cut, and the same answer"
+      (reset! scans []) (reset! ranges [])
+      (is (= #{["p18"] ["p19"]} (dl/q src open-first everything)))
+      (is (= 1 (count @ranges)))
+      (is (= [["age" 18 20]] @ranges)))))
 
 (deftest datascript-shaped-db-fns
   (let [db (-> (index/empty-db)
