@@ -588,3 +588,38 @@
         (is (= (r '[[?p "knows" ?x] [?post "creator" ?x] [(not= ?x "zz")] [?post "date" ?d] [(> ?d "120")] [(<= ?d "130")]])
                (r '[[?p "knows" ?x] [?post "creator" ?x] [?post "date" ?d] [(> ?d "120")] [(<= ?d "130")]])))
         (is (seq (r '[[?p "knows" ?x] [?post "creator" ?x] [?post "date" ?d] [(> ?d "120")] [(<= ?d "130")]])))))))
+
+(deftest count-pushdown-through-a-composite-agrees-with-counting-the-bindings
+  ;; :find [?f (count ?post)] with the (creator, forum) composite last and ?f
+  ;; bound by an earlier clause (IC05's shape): one weighted binding per
+  ;; (person, forum) instead of one per post. Expected values are a hand
+  ;; count and the same query with the pushdown defeated (adjacency broken);
+  ;; a hidden quad must not be counted; the pushdown must NOT be planned
+  ;; when ?f is free, when ?post is used again, or for another variable.
+  (let [db (reduce (fn [db [s p o]] (index/assert-quad db {:s s :p p :o o} (constantly false)))
+                   (index/empty-db)
+                   (concat
+                    (for [i (range 60)] [(str "post" i) "creator" (str "p" (mod i 4))])
+                    (for [i (range 60)] [(str "post" i) "forum" (str "f" (mod i 3))])
+                    [["p0" "knows" "p1"] ["p0" "knows" "p2"] ["p0" "knows" "p3"]
+                     ["p1" "joined" "f0"] ["p1" "joined" "f1"] ["p2" "joined" "f1"]
+                     ["p3" "joined" "f0"] ["p3" "joined" "f1"] ["p3" "joined" "f2"]]))
+        all (constantly true)
+        hide-some (fn [q] (not (#{"post5" "post9" "post13"} (:s q))))
+        pushed '[[?p "knows" ?x] [?x "joined" ?f] [?post "creator" ?x] [?post "forum" ?f]]
+        plain '[[?p "knows" ?x] [?x "joined" ?f] [?post "creator" ?x] [(not= ?x "zz")] [?post "forum" ?f]]
+        q (fn [where vis] (dl/q db {:find '[?f (count ?post)] :in '[?p] :where where} vis ["p0"]))]
+    ;; each of p1 p2 p3 owns 5 posts in each forum; joined: p1 f0 f1, p2 f1, p3 f0 f1 f2
+    (is (= #{["f0" 10] ["f1" 15] ["f2" 5]} (q plain all)) "hand count")
+    (is (= (q plain all) (q pushed all)))
+    (is (= (q plain hide-some) (q pushed hide-some)) "a hidden quad is not counted")
+    (testing "the pushdown is planned only for the count of the composite's own entity, last, with the value bound"
+      (let [fc (fn [w f] (#'dl/fuse-composites w {'?p "p0"} f))]
+        (is (some :composite/count-into (fc pushed '[?f (count ?post)])))
+        (is (not-any? :composite/count-into (fc '[[?p "knows" ?x] [?post "creator" ?x] [?post "forum" ?f]] '[?f (count ?post)])) "?f free: entries span forums")
+        (is (not-any? :composite/count-into (fc '[[?p "knows" ?x] [?x "joined" ?f] [?post "creator" ?x] [?post "forum" ?f] [?post "creator" ?y]] '[?f (count ?post)])) "?post used again later")
+        (is (not-any? :composite/count-into (fc pushed '[?f (count ?x)])) "count over another variable")
+        (is (not-any? :composite/count-into (fc pushed '[?f ?post (count ?post)])) "the entity is also projected")))
+    (testing "a per-person count still groups per person"
+      (is (= (dl/q db {:find '[?x (count ?post)] :in '[?p] :where plain} all ["p0"])
+             (dl/q db {:find '[?x (count ?post)] :in '[?p] :where pushed} all ["p0"]))))))
