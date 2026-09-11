@@ -522,3 +522,34 @@
                                 [(contains? #{:law.rel/amends :law.rel/repeals} ?kind)]]}
                    everything))))))
 
+
+(deftest the-keyed-fast-path-answers-the-two-index-shapes-and-declines-the-rest
+  ;; ayatori iteration 42: [?e a ?v] with ?e bound and [?e a v] with v
+  ;; bound/ground go straight to :eavt / :avet. Expected sets are written by
+  ;; hand; the controls are shapes the fast path must decline (nil), which
+  ;; the general path then answers.
+  (let [db (reduce (fn [db [s p o]] (index/assert-quad db {:s s :p p :o o} (constantly false)))
+                   (index/empty-db)
+                   [["a" "knows" "b"] ["a" "knows" "c"] ["b" "knows" "a"] ["a" "name" "A"] ["b" "name" "B"] ["c" "name" "C"]])
+        all (constantly true)
+        hide-c (fn [q] (not= "c" (:o q)))
+        fast #'dl/keyed-fast-path]
+    (testing "entity bound, value free"
+      (is (= #{{'?p "a" '?f "b"} {'?p "a" '?f "c"}} (fast #{{'?p "a"}} '[?p "knows" ?f] db all)))
+      (is (= #{{'?p "a" '?f "b"}} (fast #{{'?p "a"}} '[?p "knows" ?f] db hide-c)) "visible? sees every quad"))
+    (testing "entity bound, value bound: a check, not an extension"
+      (is (= #{{'?p "a" '?f "b"}} (fast #{{'?p "a" '?f "b"} {'?p "a" '?f "zz"}} '[?p "knows" ?f] db all))))
+    (testing "entity bound, value ground / wildcard"
+      (is (= #{{'?p "a"}} (fast #{{'?p "a"} {'?p "c"}} '[?p "knows" "b"] db all)))
+      (is (= #{{'?p "a"} {'?p "b"}} (fast #{{'?p "a"} {'?p "b"} {'?p "c"}} '[?p "knows" _] db all))))
+    (testing "value bound, entity free: the subjects holding it"
+      (is (= #{{'?f "a" '?k "b"}} (fast #{{'?f "a"}} '[?k "knows" ?f] db all)))
+      (is (= #{{'?k "b"}} (fast #{{}} '[?k "name" "B"] db all)) "ground value, free entity"))
+    (testing "controls: shapes the fast path declines"
+      (is (nil? (fast #{{}} '[?k "name" ?n] db all)) "neither side bound")
+      (is (nil? (fast #{{'?p "a"} {'?q "b"}} '[?p "knows" ?f] db all)) "entity not bound in every binding")
+      (is (nil? (fast #{{'?p "a"}} '[?p ?a ?f] db all)) "attribute not ground")
+      (is (nil? (fast #{} '[?p "knows" ?f] db all)) "no bindings"))
+    (testing "through q, the answer is the plain one"
+      (is (= #{["b" "B"] ["c" "C"]}
+             (dl/q db '{:find [?f ?n] :in [?p] :where [[?p "knows" ?f] [?f "name" ?n]]} all ["a"]))))))

@@ -573,6 +573,55 @@
                               group))))
           groups)))
 
+(defn- keyed-fast-path
+  "The two keyed shapes straight off the index, or nil when the clause is
+  not one of them (the caller then takes the general path):
+
+    [?e a ?v]  with a ground and ?e bound in EVERY binding  -- :eavt point
+    [?e a v]   with a ground, v ground or bound in every binding, ?e free
+               -- :avet point
+
+  The general path substitutes each binding into a pattern, groups equal
+  patterns, scans each once into a vector of quad maps and unifies each
+  row back: four allocations a row before the set. On a five-clause keyed
+  join over 882 friends (LDBC IS3 on the full SF1) that was 1.3 us per
+  binding-clause against 0.16 for a hand-written walk of the same index
+  (ayatori iteration 42, 2026-09-12). Here a binding reaches its values in
+  one index lookup and extends itself in place; `visible?` still sees
+  every quad as a map. Only on a materialized db -- a pattern source keeps
+  the general path, whose scans are the seam."
+  [bindings clause db visible?]
+  (when (and (vector? clause) (= 3 (count clause))
+             (not (if (some? *pattern-source?*) *pattern-source?* (satisfies? ds/IPatternSource db)))
+             (seq bindings))
+    (let [[e a v] clause]
+      (when (and (not (lvar? a)) (not (wildcard? a)) (lvar? e))
+        (cond
+          ;; entity bound: extend by its values of `a`
+          (every? #(contains? % e) bindings)
+          (into #{}
+                (mapcat (fn [b]
+                          (let [s (get b e)]
+                            (keep (fn [o]
+                                    (when (visible? {:s s :p a :o o})
+                                      (cond (wildcard? v) b
+                                            (lvar? v) (if (contains? b v)
+                                                        (when (= (get b v) o) b)
+                                                        (assoc b v o))
+                                            :else (when (= v o) b))))
+                                  (get (index/entity-attrs db s) a)))))
+                bindings)
+          ;; value ground or bound, entity free: the subjects holding it
+          (and (not (wildcard? v))
+               (or (not (lvar? v)) (every? #(contains? % v) bindings)))
+          (into #{}
+                (mapcat (fn [b]
+                          (let [o (if (lvar? v) (get b v) v)]
+                            (keep (fn [s] (when (visible? {:s s :p a :o o}) (assoc b e s)))
+                                  (index/by-predicate-value db a o)))))
+                bindings)
+          :else nil)))))
+
 (declare join-clause)
 
 (defn- join-branch
@@ -715,7 +764,10 @@
     ;; row for row. This changes how often the source is asked, not what is
     ;; asked or what comes back -- which matters most for `IPatternSource`,
     ;; where every scan may be a network round trip.
-    (let [groups (group-by (fn [binding] (mapv #(substitute % binding) clause)) bindings)
+    (let [fast (keyed-fast-path bindings clause db visible?)]
+     (if (some? fast)
+      fast
+     (let [groups (group-by (fn [binding] (mapv #(substitute % binding) clause)) bindings)
           card (get cardinality clause)]
       ;; ONE broad scan plus a hash join when the clause's whole relation is
       ;; small relative to the number of keyed scans it would replace;
@@ -742,7 +794,7 @@
                                     (keep #(unify-positional binding clause [(:s %) (:p %) (:o %)])
                                           rows))
                                   group))))
-              groups))))))
+              groups))))))))
 
 ;; ── recursive rules: parsing + semi-naive fixpoint ──────────────────────────
 
