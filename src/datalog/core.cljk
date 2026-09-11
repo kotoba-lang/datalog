@@ -1374,19 +1374,37 @@
 
 (defn- merge-groups
   "K-way merge of `{gv (seq of [v e])}` in `dir` value order into a lazy seq
-  of `[v e gv]`. A sorted-map keyed by `[v e gv]` holds one head per group;
-  each step pops the first (asc) or last (desc) and pushes that group's next."
+  of `[v e gv]`. One head per group in a heap; each step pops the first
+  (asc) or last (desc) and pushes that group's next.
+
+  On the JVM the heap is a `java.util.PriorityQueue` owned by the lazy seq
+  that realizes it (realized once, cached; never shared): IC09 on the full
+  SF1 merges ~2,200 groups for 20 rows, and the persistent sorted-map heap
+  was most of its 8.7 ms (ayatori iteration 37). Elsewhere a sorted-map."
   [cuts dir]
-  (let [heads (reduce-kv (fn [m gv sq] (if-let [[v e] (first sq)] (assoc m [v e gv] (rest sq)) m))
-                         (sorted-map) cuts)
-        step (fn step [heads]
-               (lazy-seq
-                (when (seq heads)
-                  (let [[[v e gv :as k] more] (if (= dir :desc) (last heads) (first heads))
-                        heads (dissoc heads k)
-                        heads (if-let [[v2 e2] (first more)] (assoc heads [v2 e2 gv] (rest more)) heads)]
-                    (cons [v e gv] (step heads))))))]
-    (step heads)))
+  #?(:clj
+     (let [cmp (if (= dir :desc)
+                 (fn [[va ea ga] [vb eb gb]] (let [c (compare vb va)] (if (zero? c) (let [c2 (compare eb ea)] (if (zero? c2) (compare gb ga) c2)) c)))
+                 (fn [[va ea ga] [vb eb gb]] (let [c (compare va vb)] (if (zero? c) (let [c2 (compare ea eb)] (if (zero? c2) (compare ga gb) c2)) c))))
+           pq (java.util.PriorityQueue. (max 1 (count cuts)) ^java.util.Comparator cmp)]
+       (doseq [[gv sq] cuts]
+         (when-let [[v e] (first sq)] (.add pq [v e gv (rest sq)])))
+       ((fn step []
+          (lazy-seq
+           (when-let [[v e gv more] (.poll pq)]
+             (when-let [[v2 e2] (first more)] (.add pq [v2 e2 gv (rest more)]))
+             (cons [v e gv] (step)))))))
+     :cljs
+     (let [heads (reduce-kv (fn [m gv sq] (if-let [[v e] (first sq)] (assoc m [v e gv] (rest sq)) m))
+                            (sorted-map) cuts)
+           step (fn step [heads]
+                  (lazy-seq
+                   (when (seq heads)
+                     (let [[[v e gv :as k] more] (if (= dir :desc) (last heads) (first heads))
+                           heads (dissoc heads k)
+                           heads (if-let [[v2 e2] (first more)] (assoc heads [v2 e2 gv] (rest more)) heads)]
+                       (cons [v e gv] (step heads))))))]
+       (step heads))))
 
 (defn- ordered-drive
   "Answer `q` for the shape `ordered-drive-plan` accepted. Returns the
