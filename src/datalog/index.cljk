@@ -140,7 +140,14 @@
   sixteen writes of the head."
   (atom {}))
 
-(def ^:private value-order-versions 16)
+(def ^:private value-order-versions
+  "Sixteen was iteration 31's choice for the value order. Iteration 35
+  (the full SF1, 1,000 inserts/s, a group order that costs ~20 s to rebuild
+  from 3M entries) measured misses: a reader whose independent half took
+  longer than sixteen writes found its snapshot untracked and rebuilt. A
+  version is a path copy (O(log n) nodes), so a thousand of them is a few
+  MB, and the lookup hits index 0 for the head."
+  1024)
 
 (defn- find-version [versions inner]
   (some (fn [v] (when (identical? (:index v) inner) v)) versions))
@@ -179,6 +186,99 @@
                    :retract (if (contains? after o) (:sorted hit) (disj (:sorted hit) o)))]
       (swap! value-order update p push-version {:index after :sorted sorted}))))
 
+;; ── group order: an attribute's values in order, per value of another ───────
+;;
+;; The ordered drive walks an attribute's values in order. When the driver's
+;; entity is also tied to a SMALL bound set through another attribute -- IC02:
+;; messages by the person's friends, ordered by creationDate -- the global
+;; value walk is nearly all misses (0.3% of 3M dates on the full SF1, so the
+;; 512-value budget is spent before 20 hits) and the plain join then touches
+;; every candidate (21k messages, 80 ms). Held here per pair [g a]: for every
+;; value of g, the sorted-set of `[v e]` for every `[e a v]` with `[e g gv]`
+;; -- so the drive merges the groups it needs and reads at most `limit`
+;; entries from each. Built on first use per (pair, index version), carried
+;; across `assert-quad`/`retract-quad` on either attribute; the bulk path does
+;; not track and the next read rebuilds.
+
+(def ^:private group-order
+  "[g a] -> vector of {:g-index <aevt inner of g> :a-index <aevt inner of a>
+  :groups {gv (sorted-set [v e] ...)}}, newest first, at most
+  `value-order-versions` deep -- the same snapshot-reader reason as
+  `value-order`."
+  (atom {}))
+
+(defn ve-compare
+  "Order for a group's `[v e]` entries: by value, then by entity. `compare`
+  on vectors orders by LENGTH first, so `[v]` would sort before every
+  `[v e]` and no cut could name a value; instead a cut names `[v ::lo]` /
+  `[v ::hi]`, and those sentinels sort below / above every entity."
+  [[va ea] [vb eb]]
+  (let [c (compare va vb)]
+    (if (zero? c)
+      (cond (identical? ea eb) 0
+            (= ea ::lo) -1 (= eb ::lo) 1
+            (= ea ::hi) 1 (= eb ::hi) -1
+            :else (compare ea eb))
+      c)))
+
+(defn empty-group [] (sorted-set-by ve-compare))
+
+(def ^:private group-order-rebuilds (atom 0))
+
+(defn group-order-rebuild-count [] @group-order-rebuilds)
+
+(defn- find-group-version [versions g-inner a-inner]
+  (some (fn [v] (when (and (identical? (:g-index v) g-inner) (identical? (:a-index v) a-inner)) v)) versions))
+
+(defn grouped-values
+  "`{gv (sorted-set [v e] ...)}` for the pair: every `[e a v]` filed under
+  each `gv` with `[e g gv]`. Entities with no `g` value are absent (nothing
+  groups them). Built once per (pair, index version) and carried across
+  writes."
+  [db g a]
+  (let [g-inner (get (:aevt db) g)
+        a-inner (get (:aevt db) a)]
+    (if-let [hit (find-group-version (get @group-order [g a]) g-inner a-inner)]
+      (:groups hit)
+      (let [groups (persistent!
+                    (reduce-kv (fn [m e vs]
+                                 (let [gvs (get (get (:eavt db) e) g)]
+                                   (if (seq gvs)
+                                     (reduce (fn [m gv]
+                                               (assoc! m gv (reduce (fn [ss v] (conj ss [v e]))
+                                                                    (get m gv (empty-group))
+                                                                    vs)))
+                                             m gvs)
+                                     m)))
+                               (transient {})
+                               (or a-inner {})))]
+        (swap! group-order-rebuilds inc)
+        (swap! group-order update [g a] push-version {:g-index g-inner :a-index a-inner :groups groups})
+        groups))))
+
+(defn- carry-group-order!
+  "After a write of `{s p o}` moved `db` to `db'`: for every tracked pair
+  [g a] where p is g or a, make the tracked entry describe db' with the
+  affected `[v e]` entries added (assert) or removed (retract, when the
+  quad is gone from db')."
+  [db db' s p o op]
+  (doseq [[[g a] versions] @group-order
+          :when (or (= p g) (= p a))]
+    (when-let [hit (find-group-version versions (get (:aevt db) g) (get (:aevt db) a))]
+      (let [attrs (get (:eavt db') s)
+            still? (or (= op :assert) (contains? (get attrs p #{}) o))
+            edits (if (= p a)
+                    (for [gv (get attrs g)] [gv [o s]])      ; o is a value of a
+                    (for [v (get attrs a)] [o [v s]]))        ; o is a value of g
+            groups (reduce (fn [m [gv entry]]
+                             (if still?
+                               (update m gv (fnil conj (empty-group)) entry)
+                               (let [ss (disj (get m gv (empty-group)) entry)]
+                                 (if (empty? ss) (dissoc m gv) (assoc m gv ss)))))
+                           (:groups hit) edits)]
+        (swap! group-order update [g a] push-version
+               {:g-index (get (:aevt db') g) :a-index (get (:aevt db') a) :groups groups})))))
+
 (defn assert-quad
   "Add `{:s :p :o}` to `db`'s four indices. `ref?` is REQUIRED (see the ns
   docstring): it decides whether `:o` is additionally indexed in `:vaet` for
@@ -191,6 +291,7 @@
               true     (update :avet upd p o s)
               (ref? o) (update :vaet upd o p s))]
     (carry-value-order! before (get (:avet db') p) p o :assert)
+    (carry-group-order! db db' s p o :assert)
     db'))
 
 (defn- ->mutable
@@ -287,6 +388,7 @@
               true     (update :avet rm p o s)
               (ref? o) (update :vaet rm o p s))]
     (carry-value-order! before (get (:avet db') p) p o :retract)
+    (carry-group-order! db db' s p o :retract)
     db'))
 
 (defn entity-attrs
