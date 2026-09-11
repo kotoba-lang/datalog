@@ -291,3 +291,26 @@
       (is (= ["new1" "500"] (first seen)) "the new message leads its creator's group")
       (is (not-any? #(= "new1" (first %)) gone) "and leaves it on retract")
       (is (= gone (binding [d/*ordered-drive* false] (run db3 "p1")))))))
+
+(defn- iterate-indexed [f x]
+  (map second (iterate (fn [[i v]] [(inc i) (f v i)]) [0 x])))
+
+(deftest the-version-window-trims-and-still-finds-a-reader-behind-the-head
+  ;; push past the window and check that (a) the head is found, (b) a reader
+  ;; a few writes behind is found, (c) a reader older than the window is not
+  ;; (it rebuilds -- the count moves), and (d) the window does not grow
+  ;; without bound.
+  (let [db0 (social-db)
+        is2 {:find '[?m ?d] :in '[?p] :where '[[?m "hasCreator" ?p] [?m "date" ?d]]
+             :order-by '[[?d :desc] [?m :asc]] :limit 3}
+        run (fn [db] (d/q db is2 everything ["p1"]))
+        write (fn [db i] (-> db (index/assert-quad {:s (str "w" i) :p "hasCreator" :o "p1"} no-refs)
+                                (index/assert-quad {:s (str "w" i) :p "date" :o (pad3 (mod i 900))} no-refs)))]
+    (run db0)
+    (let [dbs (vec (take 2600 (iterate-indexed write db0)))
+          before (index/group-order-rebuild-count)]
+      (run (peek dbs))
+      (run (nth dbs 2590))
+      (is (= before (index/group-order-rebuild-count)) "head and a reader 10 writes behind: no rebuild")
+      (run (nth dbs 1))
+      (is (= (inc before) (index/group-order-rebuild-count)) "a reader older than the window rebuilds once"))))
