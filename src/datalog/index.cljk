@@ -128,7 +128,7 @@
 
 (def ^:private value-order
   "attr -> vector of {:index <an :avet inner map> :sorted <sorted-set of its
-  keys>}, newest version first, at most `value-order-versions` deep.
+  keys>}, newest version LAST, at most 2 x `value-order-versions` deep.
 
   Several versions, not one: a reader may hold a db value a few writes older
   than the newest (a snapshot read taken while a writer advances the db -- the
@@ -149,11 +149,22 @@
   MB, and the lookup hits index 0 for the head."
   1024)
 
+;; Versions are held newest-LAST in a vector: a push is one `conj`, the head
+;; is `peek`, and the vector is trimmed to the window only every window's
+;; worth of pushes (`subvec` copied into a fresh vector so the old base is not
+;; retained). The first form -- newest-first, `(vec (take n (cons v versions)))`
+;; -- rebuilt a 1,024-element vector through a lazy seq on EVERY push, three
+;; or four pushes per insert: measured 2026-09-11 (iteration 36, full SF1,
+;; 1,100 inserts/s) as ~40 KB of garbage per push, visible as read p95 7-16 ms
+;; under the stream against ~1 ms without it.
 (defn- find-version [versions inner]
-  (some (fn [v] (when (identical? (:index v) inner) v)) versions))
+  (some (fn [v] (when (identical? (:index v) inner) v)) (rseq (or versions []))))
 
 (defn- push-version [versions v]
-  (vec (take value-order-versions (cons v versions))))
+  (let [versions (conj (or versions []) v)]
+    (if (> (count versions) (* 2 value-order-versions))
+      (into [] (subvec versions (- (count versions) value-order-versions)))
+      versions)))
 
 (def ^:private value-order-rebuilds
   "How many times `ordered-values` sorted from scratch -- so a test can tell
@@ -228,7 +239,7 @@
 (defn group-order-rebuild-count [] @group-order-rebuilds)
 
 (defn- find-group-version [versions g-inner a-inner]
-  (some (fn [v] (when (and (identical? (:g-index v) g-inner) (identical? (:a-index v) a-inner)) v)) versions))
+  (some (fn [v] (when (and (identical? (:g-index v) g-inner) (identical? (:a-index v) a-inner)) v)) (rseq (or versions []))))
 
 (defn grouped-values
   "`{gv (sorted-set [v e] ...)}` for the pair: every `[e a v]` filed under
