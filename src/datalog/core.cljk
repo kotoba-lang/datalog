@@ -419,6 +419,54 @@
                    :else c)))
               where)))))
 
+(defn- composite-clause? [x] (and (map? x) (contains? x :composite/e)))
+
+(declare group-cut form-lvars)
+
+(defn- fuse-composites
+  "Rewrite two ADJACENT clauses on the same fresh entity into one lookup
+  through the group order (`datalog.index/grouped-values`):
+
+      [?e g ?gv] [?e a ?av]           ?gv bound (or ground), ?e fresh
+      [?e g ?gv] {:range/e ?e ...}    the same with a value range on a
+
+  becomes `{:composite/e ?e :composite/g g :composite/gv gv :composite/a a
+  :composite/v av ...}`. `join-clause` answers it from the pair's sorted
+  entries under gv: a point when av is bound or ground, a cut when it is a
+  range, all of them when it is free -- one lookup per binding instead of
+  every `[?e g gv]` entity walked and filtered on `a`. Measured 2026-09-12
+  (ayatori iteration 45, LDBC IC05 on the full SF1): a reached person's
+  memberships joined after a date, and their posts in a given forum, were
+  ~300 keyed lookups each per person before this; the group order answers
+  both in O(log n + hits). Bound-ness is tracked in clause order from the
+  inputs, so a fusion never reads a variable no earlier clause bound."
+  [where initial-binding]
+  (let [where (vec where)
+        triple? (fn [c] (and (vector? c) (not (predicate-clause? c)) (= 3 (count c))))
+        ground-attr? (fn [a] (and (not (lvar? a)) (not (wildcard? a))))]
+    (loop [i 0 bound (set (keys initial-binding)) out []]
+      (if (>= i (count where))
+        out
+        (let [c (nth where i)
+              n (nth where (inc i) nil)
+              fused
+              (when (and (triple? c) n)
+                (let [[e g gv] c]
+                  (when (and (lvar? e) (not (contains? bound e)) (ground-attr? g)
+                             (or (not (lvar? gv)) (contains? bound gv)) (not (wildcard? gv)))
+                    (cond
+                      (and (triple? n) (= e (first n)) (ground-attr? (second n)) (not (wildcard? (nth n 2))))
+                      {:composite/e e :composite/g g :composite/gv gv :composite/a (second n) :composite/v (nth n 2)}
+                      (and (range-clause? n) (= e (:range/e n)) (ground-attr? (:range/a n)))
+                      {:composite/e e :composite/g g :composite/gv gv :composite/a (:range/a n) :composite/v (:range/v n)
+                       :composite/lo (:range/lo n) :composite/hi (:range/hi n)
+                       :composite/lo-open? (boolean (:range/lo-open? n)) :composite/hi-open? (boolean (:range/hi-open? n))
+                       :composite/range? true}
+                      :else nil))))]
+          (if fused
+            (recur (+ i 2) (into bound (form-lvars fused)) (conj out fused))
+            (recur (inc i) (into bound (form-lvars c)) (conj out c))))))))
+
 (defn- eval-fn-arg [db binding x]
   (if (db-arg? x) db (substitute x binding)))
 
@@ -664,6 +712,30 @@
    (join-clause bindings clause db visible? extension-for nil))
   ([bindings clause db visible? extension-for cardinality]
   (cond
+    (composite-clause? clause)
+    (let [{e :composite/e g :composite/g gv-term :composite/gv a :composite/a v :composite/v
+           lo :composite/lo hi :composite/hi lo-open? :composite/lo-open? hi-open? :composite/hi-open? range? :composite/range?} clause
+          groups (index/grouped-values db g a)
+          term-val (fn [b t] (if (lvar? t) (get b t) t))]
+      (into #{}
+            (mapcat (fn [b]
+                      (let [gv (term-val b gv-term)]
+                        (when-let [ss (get groups gv)]
+                          (let [entries (cond
+                                          range? (group-cut ss lo hi lo-open? hi-open? :asc)
+                                          (or (not (lvar? v)) (contains? b v))
+                                          (let [x (term-val b v)]
+                                            (subseq ss >= [x :datalog.index/lo] <= [x :datalog.index/hi]))
+                                          :else (seq ss))]
+                            (keep (fn [[val ent]]
+                                    (when (and (visible? {:s ent :p g :o gv}) (visible? {:s ent :p a :o val}))
+                                      (let [b (assoc b e ent)]
+                                        (if (lvar? v)
+                                          (if (contains? b v) (when (= (get b v) val) b) (assoc b v val))
+                                          b))))
+                                  entries)))))
+            bindings)))
+
     (not-clause? clause)
     (let [pattern (negated-pattern clause)]
       (into #{}
@@ -1643,7 +1715,12 @@
                      (ordered-drive db drive find order-by limit visible? clause-cardinality initial-binding))]
        (if (and driven (not= driven ::exhausted-budget))
         driven
-        (let [full (fixpoint db visible? parsed-rules)
+        (let [;; composite lookups only where the drive did not take the query
+              ;; and the db is materialized (the group order is an index of it)
+              where (if (or drive (if (some? *pattern-source?*) *pattern-source?* false))
+                      where
+                      (fuse-composites where initial-binding))
+              full (fixpoint db visible? parsed-rules)
            ;; With an aggregate in :find, binding MULTIPLICITY is observable --
            ;; `project` computes each aggregate over the bindings in its group,
            ;; so two bindings differing only in a column nobody reads are two
