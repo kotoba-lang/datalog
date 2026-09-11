@@ -119,8 +119,26 @@
 ;; its entry goes stale and the next read rebuilds once.
 
 (def ^:private value-order
-  "attr -> {:index <the :avet inner map> :sorted <sorted-set of its keys>}"
+  "attr -> vector of {:index <an :avet inner map> :sorted <sorted-set of its
+  keys>}, newest version first, at most `value-order-versions` deep.
+
+  Several versions, not one: a reader may hold a db value a few writes older
+  than the newest (a snapshot read taken while a writer advances the db -- the
+  serving shape). With one tracked version, such a read missed, rebuilt the
+  order for ITS version, and thereby untracked the newest, so the next write
+  could not carry either; under a mixed load every read rebuilt. Measured
+  2026-09-11 (iteration 31, second attempt): IC02 33.8 -> 98.8 ms, worse than
+  no carry at all. Sixteen versions cover any read whose snapshot is within
+  sixteen writes of the head."
   (atom {}))
+
+(def ^:private value-order-versions 16)
+
+(defn- find-version [versions inner]
+  (some (fn [v] (when (identical? (:index v) inner) v)) versions))
+
+(defn- push-version [versions v]
+  (vec (take value-order-versions (cons v versions))))
 
 (def ^:private value-order-rebuilds
   "How many times `ordered-values` sorted from scratch -- so a test can tell
@@ -132,13 +150,12 @@
   `compare`; use `subseq`/`rsubseq` for cuts). Built once per (attr, index
   version) and carried across `assert-quad`/`retract-quad`."
   [db attr]
-  (let [inner (get (:avet db) attr)
-        hit (get @value-order attr)]
-    (if (and hit (identical? (:index hit) inner))
+  (let [inner (get (:avet db) attr)]
+    (if-let [hit (find-version (get @value-order attr) inner)]
       (:sorted hit)
       (let [sorted (into (sorted-set) (keys inner))]
         (swap! value-order-rebuilds inc)
-        (swap! value-order assoc attr {:index inner :sorted sorted})
+        (swap! value-order update attr push-version {:index inner :sorted sorted})
         sorted))))
 
 (defn value-order-rebuild-count [] @value-order-rebuilds)
@@ -148,12 +165,11 @@
   if the tracked entry described `before`, make it describe `after` with the
   value conj'd (assert) or disj'd (retract, when no subject holds it any more)."
   [before after p o op]
-  (when-let [hit (get @value-order p)]
-    (when (identical? (:index hit) before)
-      (let [sorted (case op
-                     :assert (conj (:sorted hit) o)
-                     :retract (if (contains? after o) (:sorted hit) (disj (:sorted hit) o)))]
-        (swap! value-order assoc p {:index after :sorted sorted})))))
+  (when-let [hit (find-version (get @value-order p) before)]
+    (let [sorted (case op
+                   :assert (conj (:sorted hit) o)
+                   :retract (if (contains? after o) (:sorted hit) (disj (:sorted hit) o)))]
+      (swap! value-order update p push-version {:index after :sorted sorted}))))
 
 (defn assert-quad
   "Add `{:s :p :o}` to `db`'s four indices. `ref?` is REQUIRED (see the ns
