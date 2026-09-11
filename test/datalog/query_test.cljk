@@ -117,3 +117,16 @@
     (is (= 2 (q/cardinality db [nil "role" "admin"] everything)))
     (is (= #{{:s "alice" :p "role" :o "admin"}}
            (q/query db ["alice" "role" nil] everything)))))
+
+(deftest query-vec-is-query-without-the-set
+  ;; same quads, same visible? contract, as a vector with no duplicates
+  (let [db (reduce (fn [db [s p o]] (index/assert-quad db {:s s :p p :o o} (constantly false)))
+                   (index/empty-db)
+                   [["a" "p" 1] ["a" "p" 2] ["a" "q" 3] ["b" "p" 1] ["b" "r" 4]])
+        hide-b (fn [q] (not= "b" (:s q)))]
+    (doseq [pattern [["a" nil nil] ["a" "p" nil] [nil "p" 1] [nil "p" nil] [nil nil 1] [nil nil nil] ["zz" nil nil]]
+            vis [(constantly true) hide-b]]
+      (let [v (q/query-vec db pattern vis)]
+        (is (vector? v))
+        (is (= (q/query db pattern vis) (set v)) (str pattern))
+        (is (= (count v) (count (set v))) (str "no duplicates " pattern))))))

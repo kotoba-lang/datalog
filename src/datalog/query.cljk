@@ -72,6 +72,37 @@
   (index/check-shape! db)
   (into #{} (filter visible?) (query-seq db pattern)))
 
+(defn query-vec
+  "`query` as a VECTOR, built eagerly off the index with no lazy seq and no
+  set: the quads an index scan yields are distinct by construction, so the
+  set in `query` paid a hasheq of every `{:s :p :o}` map to remove nothing.
+  The join engine's keyed path (`datalog.core/scan*`) calls this once per
+  distinct substituted pattern; measured 2026-09-12 (ayatori iteration 41,
+  JFR on IS3 at saturation on the full SF1): `Util.hasheq` + hash-map
+  assoc + the `for` lazy-seq machinery were ~35% of the join's samples.
+  `query` keeps its set contract for every other caller."
+  [db [s p o :as pattern] visible?]
+  (index/check-shape! db)
+  (let [keep! (fn [acc q] (if (visible? q) (conj! acc q) acc))]
+    (persistent!
+     (cond
+       (some? s)
+       (reduce-kv (fn [acc p2 os]
+                    (if (or (nil? p) (= p p2))
+                      (reduce (fn [acc o2] (if (or (nil? o) (= o o2)) (keep! acc {:s s :p p2 :o o2}) acc)) acc os)
+                      acc))
+                  (transient []) (index/entity-attrs db s))
+
+       (and (some? p) (some? o))
+       (reduce (fn [acc s2] (keep! acc {:s s2 :p p :o o})) (transient []) (index/by-predicate-value db p o))
+
+       (some? p)
+       (reduce-kv (fn [acc s2 os] (reduce (fn [acc o2] (keep! acc {:s s2 :p p :o o2})) acc os))
+                  (transient []) (index/by-predicate db p))
+
+       :else
+       (reduce keep! (transient []) (query-seq db pattern))))))
+
 (defn query-range
   "Quads of `attr` whose object is in `[lo, hi)` under `visible?`.
 
