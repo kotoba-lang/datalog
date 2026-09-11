@@ -1236,6 +1236,147 @@
       (throw (ex-info "datalog.core/canonicalize: orbit exceeds the limit -- refusing to return a value that is not the minimum"
                       {:limit orbit-limit})))
     (reduce (fn [a b] (if (neg? (compare-forms b a)) b a)) (map normalize vs))))
+;; ── ordered drive: :order-by + :limit walked through the value index ──────────
+
+(def ^:dynamic *ordered-drive*
+  "Whether `q` may answer an `:order-by`/`:limit` query by walking the
+  ordering attribute's values in order and stopping at the limit. Bound to
+  false by the equivalence tests, which compare the drive against the plain
+  join on the same query; never rebound by callers."
+  true)
+
+(def ^:private sorted-values-cache
+  "attr -> {:index <the :avet inner map the sort was taken from> :sorted [..]}.
+  One entry per attribute, keyed by IDENTITY of the immutable inner map: a
+  transaction that touches the attribute replaces that map, so the cache
+  misses; one that does not touch it keeps the same object and hits. The sort
+  is O(V log V) once per (attribute, db version) -- the projection this is,
+  rebuilt from the index, never a second source of truth."
+  (atom {}))
+
+(defn- sorted-values
+  "Distinct values of `attr` on a materialized db, ascending by `compare`."
+  [db attr]
+  (let [inner (get (:avet db) attr)
+        hit (get @sorted-values-cache attr)]
+    (if (and hit (identical? (:index hit) inner))
+      (:sorted hit)
+      (let [sorted (vec (sort compare (keys inner)))]
+        (swap! sorted-values-cache assoc attr {:index inner :sorted sorted})
+        sorted))))
+
+(defn- lower-index
+  "First index in ascending `v` whose value is not below `bound` (`open?`
+  false) or strictly above it (`open?` true). nil bound -> 0."
+  [v bound open?]
+  (if (nil? bound)
+    0
+    (loop [lo 0 hi (count v)]
+      (if (>= lo hi)
+        lo
+        (let [mid (quot (+ lo hi) 2)
+              c (compare (nth v mid) bound)]
+          (if (or (neg? c) (and open? (zero? c)))
+            (recur (inc mid) hi)
+            (recur lo mid)))))))
+
+(defn- ordered-drive-plan
+  "The shape the drive answers, or nil.
+
+  `:order-by`'s first key is a plain variable `?v`; `:limit` is a positive
+  integer; no rules, aggregates, `or`, `not`, or unfused predicates; exactly
+  one clause binds `?v` in value position -- `[?e attr ?v]` or the fused range
+  on it -- with `attr` ground and `?e` a variable no input binds. That clause
+  is the DRIVER. Clauses that mention `?e` or `?v` are DEPENDENT and run per
+  value group from the driver's binding; every other clause is INDEPENDENT and
+  runs exactly once. The two halves meet in a hash semi-join on their shared
+  variables. This is the join reordering the ns docstring named as the
+  correct shape when the first pushdown was reverted (`arrangement` a98588c):
+  nothing is re-derived per value group that does not depend on the value."
+  [where find order-by limit parsed-rules initial-binding]
+  (let [[k dir] (let [e (first order-by)]
+                  (if (and (vector? e) (#{:asc :desc} (second e))) e [e :asc]))]
+    (when (and (seq order-by) (integer? limit) (pos? limit)
+               (lvar? k) (some #{k} find)
+               (empty? parsed-rules)
+               (not (some agg-find? find))
+               (every? (fn [c] (or (range-clause? c)
+                                   (and (vector? c) (= 3 (count c)) (not (predicate-clause? c)))))
+                       where))
+      (let [drivers (filter (fn [c]
+                              (if (range-clause? c)
+                                (and (= k (:range/v c)) (lvar? (:range/e c))
+                                     (not (lvar? (:range/a c))) (not (wildcard? (:range/a c)))
+                                     (not (contains? initial-binding (:range/e c))))
+                                (let [[e a v] c]
+                                  (and (= k v) (lvar? e) (not (lvar? a)) (not (wildcard? a))
+                                       (not (contains? initial-binding e))))))
+                            where)]
+        (when (= 1 (count drivers))
+          (let [driver (first drivers)
+                e (if (range-clause? driver) (:range/e driver) (first driver))
+                a (if (range-clause? driver) (:range/a driver) (second driver))
+                rest-clauses (remove #(identical? % driver) where)
+                dependent (filter #(some #{e k} (form-lvars %)) rest-clauses)
+                independent (remove #(some #{e k} (form-lvars %)) rest-clauses)]
+            ;; the driver must actually be the ONLY binder of ?e among the
+            ;; dependent clauses' entity positions? no -- ?e may appear
+            ;; anywhere; what matters is that no other clause binds ?v
+            (when (not-any? (fn [c] (some #{k} (form-lvars c))) rest-clauses)
+              {:driver driver :e e :a a :v k :dir dir
+               :lo (when (range-clause? driver) (:range/lo driver))
+               :hi (when (range-clause? driver) (:range/hi driver))
+               :lo-open? (boolean (when (range-clause? driver) (:range/lo-open? driver)))
+               :hi-open? (if (range-clause? driver) (boolean (:range/hi-open? driver)) true)
+               :dependent (vec dependent)
+               :independent (vec independent)})))))))
+
+(defn- ordered-drive
+  "Answer `q` for the shape `ordered-drive-plan` accepted. Returns the
+  ordered, limited VECTOR `order+limit` would have returned."
+  [db {:keys [e a v dir lo hi lo-open? hi-open? dependent independent]}
+   find order-by limit visible? clause-cardinality initial-binding]
+  (let [find-vars (form-lvars find)
+        dep-vars (into #{e v} (mapcat form-lvars) dependent)
+        ind-vars (into (set (keys initial-binding)) (mapcat form-lvars) independent)
+        shared (vec (set/intersection (into dep-vars (keys initial-binding)) ind-vars))
+        ;; independent half, once
+        b0 (reduce (fn [bindings [i clause]]
+                     (-> (join-clause bindings clause db visible? (constantly #{}) clause-cardinality)
+                         (prune-bindings (into (set/union find-vars (set shared))
+                                               (mapcat form-lvars (subvec independent (inc i)))))))
+                   #{initial-binding}
+                   (map-indexed vector independent))
+        b0-index (group-by #(select-keys % shared) b0)
+        ;; dependent half, per driver binding
+        chain (fn [start]
+                (reduce (fn [bindings [i clause]]
+                          (-> (join-clause bindings clause db visible? (constantly #{}) clause-cardinality)
+                              (prune-bindings (into (set/union find-vars (set shared))
+                                                    (mapcat form-lvars (subvec dependent (inc i)))))))
+                        #{start}
+                        (map-indexed vector dependent)))
+        values (sorted-values db a)
+        from (lower-index values lo lo-open?)
+        to (if (nil? hi) (count values) (lower-index values hi (not hi-open?)))
+        window (if (< from to) (subvec values from to) [])
+        walk (if (= dir :desc) (rseq window) (seq window))
+        spec (order-spec find order-by)
+        group-rows (fn [value]
+                     (let [starts (map (fn [quad] (assoc initial-binding e (:s quad) v value))
+                                       (scan* db [nil a value] visible?))
+                           joined (into #{}
+                                        (mapcat (fn [start]
+                                                  (mapcat (fn [c]
+                                                            (map #(merge % c) (get b0-index (select-keys c shared))))
+                                                          (chain start))))
+                                        starts)]
+                       (vec (sort #(compare-rows spec %1 %2) (project joined find)))))]
+    (loop [walk walk acc []]
+      (if (or (nil? walk) (>= (count acc) limit))
+        (vec (take limit acc))
+        (recur (next walk) (into acc (group-rows (first walk))))))))
+
 (defn q
   "`{:find [?var ...] :in [?param ...] :where [[e a v] ...] :rules [...]}`
   over `db`. `visible?` is required and threaded into every underlying
@@ -1302,7 +1443,12 @@
      (doseq [[_ defs] parsed-rules] (doseq [{:keys [body]} defs] (check-clause-safety! body)))
      (check-unknown-rules! all-clauses parsed-rules)
      (let [where (fuse-value-ranges where)
-           full (fixpoint db visible? parsed-rules)
+           drive (when (and *ordered-drive*
+                            (not (if (some? *pattern-source?*) *pattern-source?* false)))
+                   (ordered-drive-plan where find order-by limit parsed-rules initial-binding))]
+      (if drive
+        (ordered-drive db drive find order-by limit visible? clause-cardinality initial-binding)
+        (let [full (fixpoint db visible? parsed-rules)
            ;; With an aggregate in :find, binding MULTIPLICITY is observable --
            ;; `project` computes each aggregate over the bindings in its group,
            ;; so two bindings differing only in a column nobody reads are two
@@ -1319,7 +1465,7 @@
                                   bs)))
                             #{initial-binding}
                             (map-indexed vector where))]
-       (order+limit (project bindings find) find order-by limit))))))
+       (order+limit (project bindings find) find order-by limit))))))))
 
 #?(:cljs
    (do
