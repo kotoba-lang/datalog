@@ -64,3 +64,82 @@
   ;; Silently ignoring it would return an arbitrary order that looks sorted.
   (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                (d/q (db) (assoc by-alice :order-by '[?person]) everything ["alice"]))))
+
+;; ── the ordered drive (2026-09-11, ayatori iteration 19) ──────────────────────
+;; `q` may answer :order-by/:limit by walking the ordering attribute's values
+;; in order and stopping at the limit; the independent half of the join runs
+;; once and meets the per-value half in a hash semi-join. Every assertion
+;; below compares the drive against the plain join on the SAME query --
+;; `*ordered-drive*` bound to false is the reference -- and one checks the
+;; drive actually stops early, counted in `visible?` calls, because a drive
+;; that walks everything is the plain join with extra steps.
+
+(defn- social-db
+  "A small LDBC-shaped graph with ties on dates, a person with no friends,
+  and messages by strangers. Dates are fixed-width strings, as the SNB
+  harness stores them."
+  []
+  (let [persons ["p1" "p2" "p3" "p4" "p5" "p6"]
+        knows [["p1" "p2"] ["p1" "p3"] ["p2" "p4"] ["p3" "p4"] ["p4" "p5"] ["p2" "p3"]]
+        ;; 30 messages, creator round-robin, dates with deliberate ties
+        msgs (for [i (range 30)]
+               [(str "m" i) (nth persons (mod i 6)) (format "%03d" (* 10 (quot i 3)))])
+        replies (for [i (range 10)] [(str "r" i) (str "m" (* 2 i)) (nth persons (mod (+ i 2) 6)) (format "%03d" (+ 5 (* 10 i)))])]
+    (reduce (fn [db [s p o]] (index/assert-quad db {:s s :p p :o o} no-refs))
+            (index/empty-db)
+            (concat
+             (for [[a b] knows q [[a "knows" b] [b "knows" a]]] q)
+             (for [[m c dt] msgs q [[m "hasCreator" c] [m "date" dt]]] q)
+             (for [[r m c dt] replies q [[r "replyOf" m] [r "hasCreator" c] [r "date" dt]]] q)))))
+
+(defn- both-ways [db query inputs]
+  [(d/q db query everything inputs)
+   (binding [d/*ordered-drive* false] (d/q db query everything inputs))])
+
+(deftest the-drive-agrees-with-the-plain-join-on-every-ldbc-shape
+  (let [db (social-db)
+        ic02 (fn [max] {:find '[?x ?m ?d] :in '[?p]
+                        :where [['?p "knows" '?x] ['?m "hasCreator" '?x] ['?m "date" '?d]
+                                [(list '< '?d max)]]
+                        :order-by '[[?d :desc] [?m :asc]] :limit 5})
+        ic09 (fn [max] {:find '[?x ?m ?d] :in '[?p]
+                        :where [['?p "knows" '?f] ['?f "knows" '?x] ['?m "hasCreator" '?x] ['?m "date" '?d]
+                                [(list '< '?d max)]]
+                        :order-by '[[?d :desc] [?m :asc]] :limit 4})
+        ic08 {:find '[?a ?r ?d] :in '[?p]
+              :where '[[?m "hasCreator" ?p] [?r "replyOf" ?m] [?r "hasCreator" ?a] [?r "date" ?d]]
+              :order-by '[[?d :desc] [?r :asc]] :limit 3}
+        asc-no-range {:find '[?m ?d] :in '[?p]
+                      :where '[[?p "knows" ?x] [?m "hasCreator" ?x] [?m "date" ?d]]
+                      :order-by '[[?d :asc] [?m :desc]] :limit 7}]
+    (doseq [p ["p1" "p2" "p4" "p6" "nobody"]
+            max ["999" "055" "000"]]
+      (let [[drive plain] (both-ways db (ic02 max) [p])]
+        (is (= plain drive) (str "ic02 " p " " max)))
+      (let [[drive plain] (both-ways db (ic09 max) [p])]
+        (is (= plain drive) (str "ic09 " p " " max))))
+    (doseq [p ["p1" "p3" "p6"]]
+      (let [[drive plain] (both-ways db ic08 [p])]
+        (is (= plain drive) (str "ic08 " p)))
+      (let [[drive plain] (both-ways db asc-no-range [p])]
+        (is (= plain drive) (str "asc " p))))
+    (is (vector? (d/q db (ic02 "999") everything ["p1"])))
+    (is (= 5 (count (d/q db (ic02 "999") everything ["p1"]))))
+    (is (= [] (d/q db (ic02 "000") everything ["p1"])) "an empty range is an empty answer")))
+
+(deftest the-drive-stops-at-the-limit
+  ;; visible? is called once per quad the engine looks at; the drive must look
+  ;; at fewer quads than the plain join when the limit is small.
+  (let [db (social-db)
+        query {:find '[?x ?m ?d] :in '[?p]
+               :where '[[?p "knows" ?f] [?f "knows" ?x] [?m "hasCreator" ?x] [?m "date" ?d]]
+               :order-by '[[?d :desc] [?m :asc]] :limit 2}
+        count-with (fn [drive?]
+                     (let [n (atom 0)]
+                       (binding [d/*ordered-drive* drive?]
+                         (d/q db query (fn [_] (swap! n inc) true) ["p1"]))
+                       @n))
+        with-drive (count-with true)
+        plain (count-with false)]
+    (is (pos? with-drive))
+    (is (< with-drive plain) (str "drive looked at " with-drive " quads, plain join " plain))))
