@@ -1319,13 +1319,26 @@
             ;; no other clause may bind or constrain ?v (a predicate on ?v that
             ;; was not fused into the range stays with the plain join)
             (when (not-any? (fn [c] (some #{k} (form-lvars c))) rest-clauses)
-              {:driver driver :e e :a a :v k :dir dir
-               :lo (when (range-clause? driver) (:range/lo driver))
-               :hi (when (range-clause? driver) (:range/hi driver))
-               :lo-open? (boolean (when (range-clause? driver) (:range/lo-open? driver)))
-               :hi-open? (if (range-clause? driver) (boolean (:range/hi-open? driver)) true)
-               :dependent (vec dependent)
-               :independent (vec independent)})))))))
+              (let [ind-vars (into (set (keys initial-binding)) (mapcat form-lvars) independent)
+                    ;; GROUP clause: a dependent triple `[?e g ?f]` with `?f`
+                    ;; bound by the independent half (or an input). The drive
+                    ;; then merges the g-groups of `?f`'s values in value order
+                    ;; (`index/grouped-values`) instead of walking every value.
+                    group (some (fn [c]
+                                  (when (and (vector? c) (= 3 (count c)))
+                                    (let [[e' g f] c]
+                                      (when (and (= e' e) (not (lvar? g)) (not (wildcard? g))
+                                                 (lvar? f) (contains? ind-vars f))
+                                        {:clause c :g g :f f}))))
+                                dependent)]
+                {:driver driver :e e :a a :v k :dir dir
+                 :lo (when (range-clause? driver) (:range/lo driver))
+                 :hi (when (range-clause? driver) (:range/hi driver))
+                 :lo-open? (boolean (when (range-clause? driver) (:range/lo-open? driver)))
+                 :hi-open? (if (range-clause? driver) (boolean (:range/hi-open? driver)) true)
+                 :dependent (vec dependent)
+                 :independent (vec independent)
+                 :group group}))))))))
 
 (def ^:private ordered-drive-value-budget
   "How many distinct values the drive walks before giving up and handing the
@@ -1340,15 +1353,53 @@
   answers cheaply."
   512)
 
+(defn- group-cut
+  "One group's `[v e]` entries inside the window, in `dir` order, off a
+  sorted-set under `index/ve-compare`. The leading bound is a `subseq`/
+  `rsubseq` cut on a sentinel key (`[v ::lo]` sorts below every `[v e]`,
+  `[v ::hi]` above), so a window far from the ends costs nothing to reach;
+  the trailing bound is a lazy `take-while` on the value."
+  [ss lo hi lo-open? hi-open? dir]
+  (if (= dir :desc)
+    (let [head (cond (nil? hi) (rseq ss)
+                     hi-open? (rsubseq ss < [hi :datalog.index/lo])
+                     :else (rsubseq ss <= [hi :datalog.index/hi]))]
+      (if (nil? lo) head
+          (take-while #(let [c (compare (first %) lo)] (if lo-open? (pos? c) (not (neg? c)))) head)))
+    (let [head (cond (nil? lo) (seq ss)
+                     lo-open? (subseq ss > [lo :datalog.index/hi])
+                     :else (subseq ss >= [lo :datalog.index/lo]))]
+      (if (nil? hi) head
+          (take-while #(let [c (compare (first %) hi)] (if hi-open? (neg? c) (not (pos? c)))) head)))))
+
+(defn- merge-groups
+  "K-way merge of `{gv (seq of [v e])}` in `dir` value order into a lazy seq
+  of `[v e gv]`. A sorted-map keyed by `[v e gv]` holds one head per group;
+  each step pops the first (asc) or last (desc) and pushes that group's next."
+  [cuts dir]
+  (let [heads (reduce-kv (fn [m gv sq] (if-let [[v e] (first sq)] (assoc m [v e gv] (rest sq)) m))
+                         (sorted-map) cuts)
+        step (fn step [heads]
+               (lazy-seq
+                (when (seq heads)
+                  (let [[[v e gv :as k] more] (if (= dir :desc) (last heads) (first heads))
+                        heads (dissoc heads k)
+                        heads (if-let [[v2 e2] (first more)] (assoc heads [v2 e2 gv] (rest more)) heads)]
+                    (cons [v e gv] (step heads))))))]
+    (step heads)))
+
 (defn- ordered-drive
   "Answer `q` for the shape `ordered-drive-plan` accepted. Returns the
   ordered, limited VECTOR `order+limit` would have returned, or
   `::exhausted-budget` when the walk passed `ordered-drive-value-budget`
   values without filling the limit -- the caller then runs the plain join."
-  [db {:keys [e a v dir lo hi lo-open? hi-open? dependent independent]}
+  [db {:keys [e a v dir lo hi lo-open? hi-open? dependent independent group]}
    find order-by limit visible? clause-cardinality initial-binding]
   (let [find-vars (form-lvars find)
         dep-vars (into #{e v} (mapcat form-lvars) dependent)
+        ;; with a group clause, the merge binds ?f itself: the clause leaves
+        ;; the chain, its variable stays in dep-vars so the semi-join keys on it
+        dependent (if group (vec (remove #(identical? % (:clause group)) dependent)) dependent)
         ind-vars (into (set (keys initial-binding)) (mapcat form-lvars) independent)
         shared (vec (set/intersection (into dep-vars (keys initial-binding)) ind-vars))
         ;; independent half, once
@@ -1367,7 +1418,17 @@
                                                     (mapcat form-lvars (subvec dependent (inc i)))))))
                         starts
                         (map-indexed vector dependent)))
-        walk (ordered-window db a lo hi lo-open? hi-open? dir)
+        {g :g f :f} group
+        walk (if group
+               ;; the groups the independent half reached, merged in value order
+               (let [groups (index/grouped-values db g a)
+                     gvs (into #{} (keep #(get % f)) b0)]
+                 (merge-groups (into {} (keep (fn [gv] (when-let [ss (get groups gv)]
+                                                          (when-let [cut (seq (group-cut ss lo hi lo-open? hi-open? dir))]
+                                                            [gv cut]))))
+                                     gvs)
+                               dir))
+               (ordered-window db a lo hi lo-open? hi-open? dir))
         spec (order-spec find order-by)
         ;; Values are walked in CHUNKS: the dependent chain runs once per
         ;; chunk over every driver binding in it, so the per-step machinery
@@ -1378,11 +1439,20 @@
         ;; chain cost ~80 us, so 500 values were 40 ms; per chunk of 32 the
         ;; same walk is a few ms.
         chunk-rows (fn [values]
-                     (let [starts (into #{}
-                                        (mapcat (fn [value]
-                                                  (map (fn [quad] (assoc initial-binding e (:s quad) v value))
-                                                       (scan* db [nil a value] visible?))))
-                                        values)
+                     (let [starts (if group
+                                    ;; entries are [value entity gv]; the two quads
+                                    ;; they stand for pass `visible?` like a scan would
+                                    (into #{}
+                                          (keep (fn [[value ent gv]]
+                                                  (when (and (visible? {:s ent :p a :o value})
+                                                             (visible? {:s ent :p g :o gv}))
+                                                    (assoc initial-binding e ent v value f gv))))
+                                          values)
+                                    (into #{}
+                                          (mapcat (fn [value]
+                                                    (map (fn [quad] (assoc initial-binding e (:s quad) v value))
+                                                         (scan* db [nil a value] visible?))))
+                                          values))
                            joined (into #{}
                                         (mapcat (fn [c] (map #(merge % c) (get b0-index (select-keys c shared)))))
                                         (chain starts))]
@@ -1393,8 +1463,16 @@
       (cond
         (or (empty? walk) (>= (count acc) limit)) (vec (take limit acc))
         (>= walked ordered-drive-value-budget) ::exhausted-budget
-        :else (let [chunk (take size walk)]
-                (recur (drop size walk)
+        :else (let [;; a grouped walk is entries, several per value: a chunk
+                    ;; ends on a VALUE boundary so ties never straddle two
+                    ;; chunks (each chunk is sorted by the full spec on its own)
+                    n (if group
+                        (let [head (take size walk)
+                              last-v (first (last head))]
+                          (+ size (count (take-while #(= (first %) last-v) (drop size walk)))))
+                        size)
+                    chunk (take n walk)]
+                (recur (drop n walk)
                        (into acc (chunk-rows chunk))
                        (+ walked (count chunk))
                        (min 64 (* 2 size))))))))
