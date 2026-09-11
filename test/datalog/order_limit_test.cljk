@@ -74,6 +74,13 @@
 ;; drive actually stops early, counted in `visible?` calls, because a drive
 ;; that walks everything is the plain join with extra steps.
 
+(defn- pad3
+  "`(format \"%03d\" n)` -- spelled out because `format` does not exist on
+  ClojureScript, where this suite also runs (found 2026-09-11: the cljs
+  runner was red on main since iteration 31 for this one symbol)."
+  [n]
+  (let [s (str n)] (str (apply str (repeat (- 3 (count s)) "0")) s)))
+
 (defn- social-db
   "A small LDBC-shaped graph with ties on dates, a person with no friends,
   and messages by strangers. Dates are fixed-width strings, as the SNB
@@ -83,8 +90,8 @@
         knows [["p1" "p2"] ["p1" "p3"] ["p2" "p4"] ["p3" "p4"] ["p4" "p5"] ["p2" "p3"]]
         ;; 30 messages, creator round-robin, dates with deliberate ties
         msgs (for [i (range 30)]
-               [(str "m" i) (nth persons (mod i 6)) (format "%03d" (* 10 (quot i 3)))])
-        replies (for [i (range 10)] [(str "r" i) (str "m" (* 2 i)) (nth persons (mod (+ i 2) 6)) (format "%03d" (+ 5 (* 10 i)))])]
+               [(str "m" i) (nth persons (mod i 6)) (pad3 (* 10 (quot i 3)))])
+        replies (for [i (range 10)] [(str "r" i) (str "m" (* 2 i)) (nth persons (mod (+ i 2) 6)) (pad3 (+ 5 (* 10 i)))])]
     (reduce (fn [db [s p o]] (index/assert-quad db {:s s :p p :o o} no-refs))
             (index/empty-db)
             (concat
