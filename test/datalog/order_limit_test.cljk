@@ -314,3 +314,23 @@
       (is (= before (index/group-order-rebuild-count)) "head and a reader 10 writes behind: no rebuild")
       (run (nth dbs 1))
       (is (= (inc before) (index/group-order-rebuild-count)) "a reader older than the window rebuilds once"))))
+
+(deftest the-drive-chooses-the-global-walk-when-the-group-set-is-large
+  ;; The global walk is chosen when limit * N_e / E_G (its expected steps) is
+  ;; under both half the value budget and |G|. On social-db every creator
+  ;; holds ~1/6 of the 40 dated messages; IC09 from p1 reaches 4 creators
+  ;; (E_G ~ 27 of 40): limit 2 -> ~3 steps < 4 groups, global; limit 10 ->
+  ;; ~15 steps >= 4, grouped. Both walks must agree with the plain join, and
+  ;; the limit-2 query must still stop early (fewer visible? calls).
+  (let [db (social-db)
+        ic09 (fn [limit] {:find '[?x ?m ?d] :in '[?p]
+                          :where '[[?p "knows" ?f] [?f "knows" ?x] [(not= ?x ?p)] [?m "hasCreator" ?x] [?m "date" ?d]]
+                          :order-by '[[?d :desc] [?m :asc]] :limit limit})
+        count-with (fn [q drive?]
+                     (let [n (atom 0)]
+                       (binding [d/*ordered-drive* drive?] (d/q db q (fn [_] (swap! n inc) true) ["p1"]))
+                       @n))]
+    (doseq [limit [2 4 10]]
+      (let [[drive plain] (both-ways db (ic09 limit) ["p1"])]
+        (is (= plain drive) (str "ic09 limit " limit))))
+    (is (< (count-with (ic09 2) true) (count-with (ic09 2) false)) "the global walk still stops early")))

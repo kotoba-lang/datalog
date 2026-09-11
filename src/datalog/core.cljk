@@ -1415,9 +1415,6 @@
    find order-by limit visible? clause-cardinality initial-binding]
   (let [find-vars (form-lvars find)
         dep-vars (into #{e v} (mapcat form-lvars) dependent)
-        ;; with a group clause, the merge binds ?f itself: the clause leaves
-        ;; the chain, its variable stays in dep-vars so the semi-join keys on it
-        dependent (if group (vec (remove #(identical? % (:clause group)) dependent)) dependent)
         ind-vars (into (set (keys initial-binding)) (mapcat form-lvars) independent)
         shared (vec (set/intersection (into dep-vars (keys initial-binding)) ind-vars))
         ;; independent half, once
@@ -1428,6 +1425,32 @@
                    #{initial-binding}
                    (map-indexed vector independent))
         b0-index (group-by #(select-keys % shared) b0)
+        ;; Grouped or global walk? The grouped merge pays one cut per group
+        ;; the independent half reached (|G|). The global walk pays one step
+        ;; per value and hits at the rate E_G / N_e -- the entries in those
+        ;; groups over all entries of the ordering attribute -- so it fills
+        ;; `limit` in about limit * N_e / E_G steps, and past the value budget
+        ;; it would hand the query to the plain join. Global only when that
+        ;; step count is under both half the budget and |G|. E_G is a count
+        ;; per group (O(1) on a sorted-set), N_e the attribute's subject count.
+        ;; Measured 2026-09-12 (ayatori iteration 39, full SF1): IC09 reaches
+        ;; ~2,200 of ~9,900 creators holding 22% of all messages -- ~90 steps
+        ;; against 2,200 cuts, and the cuts were the largest engine term in
+        ;; the JFR profile; a first rule on group COUNTS alone sent IC07
+        ;; (2,000 message groups holding 0.2% of all likes) to the global
+        ;; walk, which exhausted its budget and fell to the plain join at
+        ;; 81 ms p50 -- refuted the same hour, hence the entry ratio.
+        groups (when group (index/grouped-values db (:g group) a))
+        gvs (when group (into #{} (keep #(get % (:f group))) b0))
+        group (when group
+                (let [n-e (count (get (:aevt db) a {}))
+                      e-g (reduce + 0 (map #(count (get groups %)) gvs))
+                      steps (if (pos? e-g) (/ (* limit n-e) e-g) ##Inf)]
+                  (when-not (< steps (min (/ ordered-drive-value-budget 2) (count gvs)))
+                    group)))
+        ;; with a group clause, the merge binds ?f itself: the clause leaves
+        ;; the chain, its variable stays in dep-vars so the semi-join keys on it
+        dependent (if group (vec (remove #(identical? % (:clause group)) dependent)) dependent)
         ;; dependent half, per driver binding
         chain (fn [starts]
                 (reduce (fn [bindings [i clause]]
@@ -1439,13 +1462,11 @@
         {g :g f :f} group
         walk (if group
                ;; the groups the independent half reached, merged in value order
-               (let [groups (index/grouped-values db g a)
-                     gvs (into #{} (keep #(get % f)) b0)]
-                 (merge-groups (into {} (keep (fn [gv] (when-let [ss (get groups gv)]
-                                                          (when-let [cut (seq (group-cut ss lo hi lo-open? hi-open? dir))]
-                                                            [gv cut]))))
-                                     gvs)
-                               dir))
+               (merge-groups (into {} (keep (fn [gv] (when-let [ss (get groups gv)]
+                                                        (when-let [cut (seq (group-cut ss lo hi lo-open? hi-open? dir))]
+                                                          [gv cut]))))
+                                   gvs)
+                             dir)
                (ordered-window db a lo hi lo-open? hi-open? dir))
         spec (order-spec find order-by)
         ;; Values are walked in CHUNKS: the dependent chain runs once per
