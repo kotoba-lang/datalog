@@ -553,3 +553,38 @@
     (testing "through q, the answer is the plain one"
       (is (= #{["b" "B"] ["c" "C"]}
              (dl/q db '{:find [?f ?n] :in [?p] :where [[?p "knows" ?f] [?f "name" ?n]]} all ["a"]))))))
+
+(deftest composite-lookups-through-the-group-order-agree-with-the-plain-clauses
+  ;; [?e g ?gv] [?e a ?av] adjacent, ?gv bound, ?e fresh -> one lookup per
+  ;; binding through datalog.index/grouped-values. Expected rows are the
+  ;; same query answered clause by clause (the fusion turned off by breaking
+  ;; adjacency with a predicate that changes nothing).
+  (let [db (reduce (fn [db [s p o]] (index/assert-quad db {:s s :p p :o o} (constantly false)))
+                   (index/empty-db)
+                   (concat
+                    (for [i (range 40)] [(str "post" i) "creator" (str "p" (mod i 4))])
+                    (for [i (range 40)] [(str "post" i) "forum" (str "f" (mod i 3))])
+                    (for [i (range 40)] [(str "post" i) "date" (str (+ 100 i))])
+                    [["p0" "knows" "p1"] ["p0" "knows" "p2"] ["p1" "knows" "p3"]]))
+        all (constantly true)
+        hide-post7 (fn [q] (not= "post7" (:s q)))
+        fused '[[?p "knows" ?x] [?post "creator" ?x] [?post "forum" ?f]]
+        unfused '[[?p "knows" ?x] [?post "creator" ?x] [(not= ?x "zz")] [?post "forum" ?f]]
+        q (fn [where vis] (dl/q db {:find '[?x ?post ?f] :in '[?p] :where where} vis ["p0"]))]
+    (testing "the pre-pass fuses the adjacent pair and leaves the broken one alone"
+      (is (= 1 (count (filter #'dl/composite-clause? (#'dl/fuse-composites fused {'?p "p0"})))))
+      (is (= 0 (count (filter #'dl/composite-clause? (#'dl/fuse-composites unfused {'?p "p0"})))))
+      (is (= 0 (count (filter #'dl/composite-clause? (#'dl/fuse-composites '[[?post "creator" ?x] [?post "forum" ?f]] {}))))
+          "?x unbound: nothing to look up under"))
+    (testing "point: ?f free, then ?f bound by an earlier clause, then ground"
+      (is (= (q unfused all) (q fused all)))
+      (is (= (q unfused hide-post7) (q fused hide-post7)) "visible? sees both quads")
+      (is (= (dl/q db {:find '[?x ?post] :in '[?p ?f] :where '[[?p "knows" ?x] [?post "creator" ?x] [?post "forum" ?f]]} all ["p0" "f1"])
+             (dl/q db {:find '[?x ?post] :in '[?p ?f] :where '[[?p "knows" ?x] [?post "creator" ?x] [(not= ?x "zz")] [?post "forum" ?f]]} all ["p0" "f1"])))
+      (is (= (dl/q db {:find '[?x ?post] :in '[?p] :where '[[?p "knows" ?x] [?post "creator" ?x] [?post "forum" "f2"]]} all ["p0"])
+             (dl/q db {:find '[?x ?post] :in '[?p] :where '[[?p "knows" ?x] [?post "creator" ?x] [(not= ?x "zz")] [?post "forum" "f2"]]} all ["p0"]))))
+    (testing "range on the second attribute"
+      (let [r (fn [where] (dl/q db {:find '[?x ?post ?d] :in '[?p] :where where} all ["p0"]))]
+        (is (= (r '[[?p "knows" ?x] [?post "creator" ?x] [(not= ?x "zz")] [?post "date" ?d] [(> ?d "120")] [(<= ?d "130")]])
+               (r '[[?p "knows" ?x] [?post "creator" ?x] [?post "date" ?d] [(> ?d "120")] [(<= ?d "130")]])))
+        (is (seq (r '[[?p "knows" ?x] [?post "creator" ?x] [?post "date" ?d] [(> ?d "120")] [(<= ?d "130")]])))))))
