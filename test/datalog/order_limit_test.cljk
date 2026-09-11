@@ -183,3 +183,23 @@
         (is (not= "m99" (ffirst a3)))
         (is (= rebuilds-before (index/value-order-rebuild-count)))
         (is (= a3 (binding [d/*ordered-drive* false] (d/q db3 query everything ["p1"]))))))))
+
+(deftest a-snapshot-reader-behind-the-head-still-hits-the-order
+  ;; Serving shape: a reader holds a db a few writes older than the head.
+  ;; Its read must hit a tracked version, and must not untrack the head.
+  (let [db0 (social-db)
+        query {:find '[?m ?d] :in '[?p]
+               :where '[[?p "knows" ?x] [?m "hasCreator" ?x] [?m "date" ?d]]
+               :order-by '[[?d :desc] [?m :asc]] :limit 3}
+        _ (d/q db0 query everything ["p1"])
+        head (reduce (fn [db i] (-> db (index/assert-quad {:s (str "n" i) :p "hasCreator" :o "p2"} no-refs)
+                                       (index/assert-quad {:s (str "n" i) :p "date" :o (str 900 i)} no-refs)))
+                     db0 (range 5))
+        rebuilds (index/value-order-rebuild-count)]
+    (is (= "n4" (ffirst (d/q head query everything ["p1"]))))
+    (is (= rebuilds (index/value-order-rebuild-count)) "the head is tracked")
+    (is (= 3 (count (d/q db0 query everything ["p1"]))) "the old snapshot still answers")
+    (is (= rebuilds (index/value-order-rebuild-count)) "and hits its own version, no rebuild")
+    (let [head2 (index/assert-quad (index/assert-quad head {:s "n9" :p "hasCreator" :o "p2"} no-refs) {:s "n9" :p "date" :o "999"} no-refs)]
+      (is (= "n9" (ffirst (d/q head2 query everything ["p1"]))))
+      (is (= rebuilds (index/value-order-rebuild-count)) "the old snapshot's read did not untrack the head"))))
