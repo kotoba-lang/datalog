@@ -143,3 +143,20 @@
         plain (count-with false)]
     (is (pos? with-drive))
     (is (< with-drive plain) (str "drive looked at " with-drive " quads, plain join " plain))))
+
+(deftest the-drive-keeps-a-predicate-on-the-independent-half
+  ;; `[(not= ?x ?p)]` excludes the start person from a two-hop expansion
+  ;; INSIDE the query, so the limit is taken after the exclusion. Applied by
+  ;; the harness afterwards, the limit would have been taken first and rows
+  ;; the answer needed could be cut -- found by the startup gate on full SF1
+  ;; (ayatori iteration 25, one IC09 parameter disagreed). The drive must
+  ;; agree with the plain join on the same query.
+  (let [db (social-db)
+        query (fn [max] {:find '[?x ?m ?d] :in '[?p]
+                         :where [['?p "knows" '?f] ['?f "knows" '?x] '[(not= ?x ?p)]
+                                 ['?m "hasCreator" '?x] ['?m "date" '?d] [(list '< '?d max)]]
+                         :order-by '[[?d :desc] [?m :asc]] :limit 4})]
+    (doseq [p ["p1" "p2" "p4"] max ["999" "055"]]
+      (let [[drive plain] (both-ways db (query max) [p])]
+        (is (= plain drive) (str "ic09 with not= " p " " max))
+        (is (not-any? (fn [[x _ _]] (= x p)) drive) "the start person is excluded")))))

@@ -1311,8 +1311,11 @@
                (lvar? k) (some #{k} find)
                (empty? parsed-rules)
                (not (some agg-find? find))
+               ;; triples, fused ranges, and predicate clauses (a predicate runs
+               ;; where join-clause runs it: in the half its variables put it)
                (every? (fn [c] (or (range-clause? c)
-                                   (and (vector? c) (= 3 (count c)) (not (predicate-clause? c)))))
+                                   (predicate-clause? c)
+                                   (and (vector? c) (= 3 (count c)))))
                        where))
       (let [drivers (filter (fn [c]
                               (if (range-clause? c)
@@ -1333,6 +1336,8 @@
             ;; the driver must actually be the ONLY binder of ?e among the
             ;; dependent clauses' entity positions? no -- ?e may appear
             ;; anywhere; what matters is that no other clause binds ?v
+            ;; no other clause may bind or constrain ?v (a predicate on ?v that
+            ;; was not fused into the range stays with the plain join)
             (when (not-any? (fn [c] (some #{k} (form-lvars c))) rest-clauses)
               {:driver driver :e e :a a :v k :dir dir
                :lo (when (range-clause? driver) (:range/lo driver))
