@@ -4,7 +4,7 @@
   `link-edn-safe-roundtrip` and `ref-indexing-naturalizes-to-ipld-link` are
   deliberately NOT ported: they test the IPLD default this extraction
   removed, and they belong to the persistence half that stayed behind."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.text :as str]
             [datalog.index :as index]))
 

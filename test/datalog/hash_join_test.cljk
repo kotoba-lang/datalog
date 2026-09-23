@@ -8,7 +8,7 @@
   planner's cardinality hint and once without, and asserts the two results are
   equal. That is the whole safety argument: the hint selects a strategy, never
   a semantics."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [datalog.index :as index]
             [datalog.core :as d]))
 

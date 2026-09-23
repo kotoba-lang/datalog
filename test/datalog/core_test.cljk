@@ -1,5 +1,5 @@
 (ns datalog.core-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [datalog.index :as index]
             [datalog.core :as dl]
             [datom.source :as ds]))
