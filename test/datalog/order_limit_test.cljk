@@ -2,7 +2,7 @@
   "ADR-2608021000 §6-2: :order-by / :limit, so a top-N query is expressible in
   the query instead of in host code. Every LDBC SNB complex read is a
   'most recent N' query."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [datalog.index :as index]
             [datalog.core :as d]))
 

@@ -6,7 +6,7 @@
   because pruning is only ever allowed to change how many intermediate rows
   exist -- never which rows come out. The one case where it is NOT allowed is
   aggregates, where multiplicity is the answer, and that has its own test."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [datalog.index :as index]
             [datalog.core :as d]))
 

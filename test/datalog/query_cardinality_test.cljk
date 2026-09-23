@@ -3,7 +3,7 @@
   building the set. The planner calls this on every clause of every query, so
   the only thing that matters is that it agrees with `query` -- a count that
   drifts from the read it is estimating would silently mis-order joins."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [datalog.index :as index]
             [datalog.query :as q]))
 

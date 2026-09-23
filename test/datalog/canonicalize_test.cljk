@@ -1,7 +1,7 @@
 (ns datalog.canonicalize-test
   "Canonical form over the three orders this engine does not read -- and the
   measurement that says it does not read them."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [datalog.core :as d]
             [datalog.index :as index]))

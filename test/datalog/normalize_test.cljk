@@ -1,6 +1,6 @@
 (ns datalog.normalize-test
   "α-canonical form: what it decides, and the three things it must not touch."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [datalog.core :as d]
             [datalog.index :as index]))

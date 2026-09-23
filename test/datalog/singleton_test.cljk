@@ -4,7 +4,7 @@
   counterpart. Both directions: the set semantics are asserted against a real
   set, and the storage assertion has a control that shows the ordinary set
   where two values are held."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [clojure.set :as set]
             [datalog.singleton :as singleton]
             [datalog.index :as index]))
