@@ -62,7 +62,7 @@
 
 (deftest ordering-by-a-key-outside-find-is-rejected
   ;; Silently ignoring it would return an arbitrary order that looks sorted.
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+  (is (thrown? js/Error
                (d/q (db) (assoc by-alice :order-by '[?person]) everything ["alice"]))))
 
 ;; ── the ordered drive (2026-09-11, ayatori iteration 19) ──────────────────────

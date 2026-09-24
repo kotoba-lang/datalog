@@ -96,13 +96,13 @@
    :ocp {}})
 
 (deftest every-entry-point-refuses-a-pre-rename-db
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+  (is (thrown? js/Error
                (q/query legacy-db ["alice" nil nil] everything)))
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+  (is (thrown? js/Error
                (q/query-range legacy-db "role" nil nil everything)))
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+  (is (thrown? js/Error
                (q/cardinality legacy-db [nil "role" nil] everything)))
-  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+  (is (thrown? js/Error
                (q/estimate-cardinality legacy-db [nil "role" nil]))))
 
 (deftest the-silent-answer-the-guard-replaces

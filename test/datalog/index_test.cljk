@@ -191,7 +191,7 @@
     (is (nil? (:eavt legacy-db)))
     (is (empty? (get (:eavt legacy-db) "alice" {}))))
   (testing "so the guard raises, and names both what it found and what it wants"
-    (let [e (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (let [e (is (thrown? js/Error
                          (index/check-shape! legacy-db)))
           d (ex-data e)]
       (is (= :datalog.index/legacy-index-keys (:problem d)))
