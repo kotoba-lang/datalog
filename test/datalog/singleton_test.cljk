@@ -5,7 +5,7 @@
   set, and the storage assertion has a control that shows the ordinary set
   where two values are held."
   (:require [kotoba.test :refer [deftest is testing]]
-            [clojure.set :as set]
+            [kotoba.lang.coll :as set]
             [datalog.singleton :as singleton]
             [datalog.index :as index]))
 

@@ -115,7 +115,7 @@
             [datalog.index :as index]
             [datom.source :as ds]
             [kotoba.lang.text :as str]
-            [clojure.set :as set]))
+            [kotoba.lang.coll :as set]))
 
 (def ^:dynamic ^:private *pattern-source?*
   "Whether the db of the query currently running satisfies `IPatternSource`.
