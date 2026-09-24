@@ -120,7 +120,7 @@
 (deftest unbound-variable-inside-not-clause-throws
   (let [db (fixture-db)]
     (testing "?role is never bound by a positive clause before the negation -- unsafe, must throw"
-      (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+      (is (thrown-with-msg? js/Error
                              #"unsafe negation"
                              (dl/q db {:find '[?s]
                                        :where '[[?s "name" _]
@@ -256,13 +256,13 @@
 
 (deftest unknown-rule-invocation-throws
   (let [db (chain-db)]
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                            #"unknown rule"
                            (dl/q db {:find '[?y] :where '[(nope "alice" ?y)]} everything)))))
 
 (deftest rule-invoked-with-wrong-arity-throws
   (let [db (chain-db)]
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                            #"wrong number of arguments"
                            (dl/q db {:find '[?y]
                                      :where '[(anc "alice" ?y "extra")]
@@ -271,7 +271,7 @@
 
 (deftest rule-definitions-with-mismatched-arity-throws
   (let [db (chain-db)]
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                            #"same arity"
                            (dl/q db {:find '[?x ?y]
                                      :where '[(bad ?x ?y)]
@@ -281,7 +281,7 @@
 
 (deftest negating-a-rule-invocation-throws
   (let [db (chain-db)]
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                            #"negation of a rule invocation is not supported"
                            (dl/q db {:find '[?y]
                                      :where '[[?y "parent" _] (not (ancestor "alice" ?y))]
@@ -290,7 +290,7 @@
 
 (deftest unsafe-negation-inside-a-rule-body-throws
   (let [db (chain-db)]
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                            #"unsafe negation"
                            (dl/q db {:find '[?x ?y]
                                      :where '[(risky ?x ?y)]
@@ -330,13 +330,13 @@
 
 (deftest unbound-variable-inside-predicate-clause-throws
   (let [db (ages-db)]
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                            #"unsafe function/predicate clause"
                            (dl/q db {:find '[?s] :where '[[(> ?nope 5)]]} everything)))))
 
 (deftest unknown-function-in-clause-throws
   (let [db (ages-db)]
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                            #"unknown or disallowed function"
                            (dl/q db {:find '[?s] :where '[[?s "age" ?age] [(unknown-fn ?age)]]} everything)))))
 
